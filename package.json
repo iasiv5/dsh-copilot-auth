@@ -1,0 +1,51 @@
+{
+  "name": "@inventec/dsh-copilot-auth",
+  "version": "1.0.0",
+  "description": "Device-code sign-in UI and preconfigured route for the built-in GitHub Copilot provider of DeepSeek Harness (DSH)",
+  "type": "module",
+  "license": "MIT",
+  "author": "iasi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iasiv5/dsh-copilot-auth.git"
+  },
+  "main": "./src/host.mjs",
+  "exports": {
+    ".": "./src/host.mjs",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src/host.mjs",
+    "src/shared.mjs",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build-client.mjs",
+    "test": "node --test test/",
+    "prepack": "npm run build"
+  },
+  "engines": { "node": ">=20" },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.24.0",
+    "react": "^18.2.0",
+    "yaml": "^2.5.0"
+  },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  }
+}
