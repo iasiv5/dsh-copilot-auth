@@ -109,6 +109,16 @@ test("挂载时若已登录同样同步一次模型目录", async () => {
   assert.deepEqual(ctx.settings.mutateCalls[0].ops[0].value, [{ id: "gpt-5.4" }]);
 });
 
+test("模型同步失败时经 /status 暴露 syncError", async () => {
+  const ctx = makeCtx();
+  ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } };
+  ctx.settings.mutate = async () => { throw new Error("validation boom"); };
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  const res = await call(handler(ctx, "/status"));
+  assert.equal(res.body.syncError, "validation boom");
+});
+
 test("跨站 Origin 拒绝 403，同源/无 Origin 放行", async () => {
   const ctx = makeCtx();
   assert.equal((await call(handler(ctx, "/start"), { method: "POST", headers: { origin: "http://evil.example" } })).code, 403);

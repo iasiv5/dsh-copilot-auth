@@ -48,11 +48,15 @@ function guard(req, res, method) {
 export function apply(ctx) {
   const r = routes();
   let attempt = emptyState();
+  let lastSyncError;
 
-  // 挂载时若已登录，同步一次模型目录（凭据持久化在本地，模型列表随账号刷新）
-  void syncAvailableModels(ctx).catch((err) => {
-    ctx.logger?.warn?.("copilot-auth: mount-time model sync failed: %s", String(err?.message ?? err));
+  // 挂载时若已登录，同步一次模型目录（凭据持久化在本地，模型列表随账号刷新）。
+  // 失败不静默：错误经 /status 的 syncError 字段暴露，便于诊断。
+  const sync = () => syncAvailableModels(ctx).then(() => { lastSyncError = undefined; }).catch((err) => {
+    lastSyncError = String(err?.message ?? err);
+    ctx.logger?.warn?.("copilot-auth: model sync failed: %s", lastSyncError);
   });
+  void sync();
 
   ctx.webServer.register({
     kind: "exact",
@@ -85,9 +89,7 @@ export function apply(ctx) {
           // AuthorizationOutcome.status: 'authorized' | 'cancelled'（types.d.ts L68-71）
           if (outcome && outcome.status === "authorized") {
             attempt.status = "authorized";
-            void syncAvailableModels(ctx).catch((err) => {
-              ctx.logger?.warn?.("copilot-auth: model sync failed: %s", String(err?.message ?? err));
-            });
+            void sync();
           } else {
             attempt.status = "failed";
             attempt.error = "登录已取消";
@@ -123,7 +125,7 @@ export function apply(ctx) {
       } catch {
         configured = false;
       }
-      json(res, 200, { configured });
+      json(res, 200, { configured, syncError: lastSyncError });
     },
   });
 
