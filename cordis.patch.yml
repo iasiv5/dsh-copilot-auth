@@ -1,0 +1,20 @@
+# 1) 前置：0.1.2-rc.1 的全部 6 个内置 bundle 均未挂载 authorization 服务；
+#    dsh-llm-pi-ai 的登录流注册是被动 ctx.inject（lib/index.js L2501），不挂此行则 flow 不存在。
+- insert:
+    - id: copilot-authorization
+      name: '@deepseek-ai/dsh-authorization'
+    # 2) 本插件 host 半区（web 树有 webServer 服务才会激活）
+    #    路由前缀固定 /copilot-auth、不做配置项：client 侧 fetch 硬编码同一路径，
+    #    配置一旦漂移 client 即 404（见附录 B）
+    - id: copilot-auth
+      name: '@inventec/dsh-copilot-auth'
+# 3) 预置 GitHub Copilot 路由：entry config 作为 settings base 层，
+#    用户 settings.yaml 的 llm-pi-ai: 节逐字段递归覆盖其上。
+#    不写 apiKeyEnv → 认证走 OAuth 凭据记录（llm-pi-ai/github-copilot）。
+#    带 name 做 mismatch 防御：未来 base 若改名，patch 警告而非错挂他行。
+- id: llm-pi-ai
+  name: '@deepseek-ai/dsh-llm-pi-ai'
+  config:
+    providers:
+      github-copilot:
+        displayName: GitHub Copilot
