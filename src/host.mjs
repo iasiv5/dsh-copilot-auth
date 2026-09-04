@@ -3,7 +3,20 @@
 import { CREDENTIAL_KEY, emptyState, routes } from "./shared.mjs";
 
 export const name = "copilot-auth";
-export const inject = ["webServer", "authorization", "credentials"];
+export const inject = ["webServer", "authorization", "credentials", "settings"];
+
+// 登录成功（或挂载时已登录）后，把凭据里发现的全部可用模型写入用户 settings
+// 的模型目录——pi-ai 内置目录快照可能落后于账号实际可用模型，这一步保证
+// Models 页与模型选择器开箱即得完整列表（turnkey，用户新增需求 2026-09-04）。
+// 注意：每次登录/挂载会用最新发现列表覆盖该目录，手工定制会被重置。
+async function syncAvailableModels(ctx) {
+  const record = await ctx.credentials.readRecord(CREDENTIAL_KEY);
+  const ids = record?.payload?.availableModelIds;
+  if (!Array.isArray(ids) || ids.length === 0) return;
+  await ctx.settings.mutate("llm-pi-ai", [
+    { op: "set", path: ["providers", "github-copilot", "models"], value: ids.map((id) => ({ id })) },
+  ]);
+}
 
 function sameOrigin(req) {
   const origin = req.headers?.origin;
@@ -36,6 +49,11 @@ export function apply(ctx) {
   const r = routes();
   let attempt = emptyState();
 
+  // 挂载时若已登录，同步一次模型目录（凭据持久化在本地，模型列表随账号刷新）
+  void syncAvailableModels(ctx).catch((err) => {
+    ctx.logger?.warn?.("copilot-auth: mount-time model sync failed: %s", String(err?.message ?? err));
+  });
+
   ctx.webServer.register({
     kind: "exact",
     path: r.start,
@@ -67,6 +85,9 @@ export function apply(ctx) {
           // AuthorizationOutcome.status: 'authorized' | 'cancelled'（types.d.ts L68-71）
           if (outcome && outcome.status === "authorized") {
             attempt.status = "authorized";
+            void syncAvailableModels(ctx).catch((err) => {
+              ctx.logger?.warn?.("copilot-auth: model sync failed: %s", String(err?.message ?? err));
+            });
           } else {
             attempt.status = "failed";
             attempt.error = "登录已取消";

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import plugin from "../src/host.mjs";
 
-function makeCtx() {
+function makeCtx(script = {}) {
   const ctx = {
     routes: [],
     webServer: { register: (r) => ctx.routes.push(r) },
@@ -14,8 +14,10 @@ function makeCtx() {
       return { status: "authorized" };
     } },
     credentials: { describeRecord: async (k) => ({ configured: ctx.script.record?.[k] !== undefined }),
+                   readRecord: async (k) => ctx.script.record?.[k],
                    deleteRecordCalls: [], deleteRecord: async (k) => { ctx.credentials.deleteRecordCalls.push(k); ctx.script.record = {}; return true; } },
-    script: { notices: [], record: {} },
+    settings: { mutateCalls: [], mutate: async (ns, ops) => { ctx.settings.mutateCalls.push({ ns, ops }); } },
+    script: { notices: [], record: {}, ...script },
   };
   plugin.apply(ctx, {});
   return ctx;
@@ -29,7 +31,7 @@ const call = async (h, req = {}) => { const res = { code: 0, body: null,
 test("插件身份与路由注册", () => {
   const ctx = makeCtx();
   assert.equal(plugin.name, "copilot-auth");
-  assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials"]);
+  assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings"]);
   assert.ok(ctx.routes.every((r) => r.kind === "exact"), "四条路由必须都是 exact");
   assert.deepEqual(ctx.routes.map((r) => r.path).sort(),
     ["/copilot-auth/logout", "/copilot-auth/start", "/copilot-auth/state", "/copilot-auth/status"]);
@@ -86,6 +88,25 @@ test("status 与 logout 操作固定 credential key", async () => {
   assert.deepEqual(ctx.credentials.deleteRecordCalls, ["llm-pi-ai/github-copilot"]);
   const again = await call(handler(ctx, "/logout"), { method: "POST" }); // 评审 Agent 注 2026-09-03：补 v1-A2 的「无记录时同样 ok:true」断言（首次 logout 已清空 record，此即无记录形态）
   assert.equal(again.body.ok, true);
+});
+
+test("authorized 后把发现的可用模型写入用户 settings 的模型目录", async () => {
+  const ctx = makeCtx();
+  ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.6-luna", "gpt-5.4"] } } };
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctx.settings.mutateCalls.length, 1);
+  const { ns, ops } = ctx.settings.mutateCalls[0];
+  assert.equal(ns, "llm-pi-ai");
+  assert.deepEqual(ops[0].path, ["providers", "github-copilot", "models"]);
+  assert.deepEqual(ops[0].value, [{ id: "gpt-5.6-luna" }, { id: "gpt-5.4" }]);
+});
+
+test("挂载时若已登录同样同步一次模型目录", async () => {
+  const ctx = makeCtx({ record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4"] } } } });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctx.settings.mutateCalls.length, 1);
+  assert.deepEqual(ctx.settings.mutateCalls[0].ops[0].value, [{ id: "gpt-5.4" }]);
 });
 
 test("跨站 Origin 拒绝 403，同源/无 Origin 放行", async () => {
