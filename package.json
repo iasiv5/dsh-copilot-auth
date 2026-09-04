@@ -25,7 +25,7 @@
   ],
   "scripts": {
     "build": "node scripts/build-client.mjs",
-    "test": "node --test test/",
+    "test": "node --test",
     "prepack": "npm run build"
   },
   "engines": { "node": ">=20" },
