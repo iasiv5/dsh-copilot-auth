@@ -48,6 +48,7 @@ dsh plugin --profile web add @inventec/dsh-copilot-auth
 
 - 通过 `cordis.patch.yml` 三段生效：① 挂载 `@deepseek-ai/dsh-authorization` 服务（DSH 内置 bundle 未挂载，不挂则内置登录流不存在）② 注册本插件（host 侧在 webserver 上开 4 条本地路由：`/copilot-auth/start|state|status|logout`，跨站 Origin 拒绝）③ 以 settings base 层预置 `github-copilot` 路由（用户 `settings.yaml` 可逐字段覆盖）
 - 登录走 GitHub 设备码流；凭据存 `~/.dsh/.credentials.yaml`（强制 600 权限）的 `llm-pi-ai/github-copilot` 记录，Copilot 临时 token 到期自动刷新
+- **登录成功后自动同步模型目录**：把凭据里发现的全部可用模型写入该路由的模型目录（登录时与插件每次启动时各同步一次），无需手动「添加模型」
 
 ## 风险与合规
 
@@ -61,6 +62,7 @@ dsh plugin --profile web add @inventec/dsh-copilot-auth
 - `settings.yaml` 的 `llm-pi-ai:` 节只能稀疏覆盖字段，无法删除预置路由本身（移除须卸载本插件）
 - 路由前缀 `/copilot-auth` 两侧硬编码，不可配置
 - DSH rc 版本耦合：实测 `0.1.2-rc.1`，peer 仅 `@deepseek-ai/cordis@^4.0.2`
+- 每次登录成功或插件启动，会用账号最新发现的可用模型**全量覆盖** GitHub Copilot 路由的模型目录——对目录的手工定制（如模型显示名）会在下次同步时被重置为裸模型 id
 
 ## License
 
