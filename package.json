@@ -1,6 +1,6 @@
 {
   "name": "@inventec/dsh-copilot-auth",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Device-code sign-in UI and preconfigured route for the built-in GitHub Copilot provider of DeepSeek Harness (DSH)",
   "type": "module",
   "license": "MIT",
@@ -28,7 +28,9 @@
     "test": "node --test",
     "prepack": "npm run build"
   },
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.2"
   },
@@ -38,7 +40,9 @@
     "yaml": "^2.5.0"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "inject": [
