@@ -63,6 +63,7 @@ dsh plugin --profile web add @inventec/dsh-copilot-auth
 - 路由前缀 `/copilot-auth` 两侧硬编码，不可配置
 - DSH rc 版本耦合：实测 `0.1.2-rc.1`，peer 仅 `@deepseek-ai/cordis@^4.0.2`
 - 每次登录成功或插件启动，会用账号最新发现的可用模型**全量覆盖** GitHub Copilot 路由的模型目录——对目录的手工定制（如模型显示名）会在下次同步时被重置为裸模型 id
+- 模型目录只写入 pi-ai 内置目录已描述的模型：目录快照外的新模型暂不写入（catalog 路由的校验要求模型协议可解析），pi-ai 升级目录后会随同步自动出现
 
 ## License
 
