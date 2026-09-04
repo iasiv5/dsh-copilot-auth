@@ -54,7 +54,28 @@ function CopilotSection() {
     let alive = true;
     fetch("/copilot-auth/status")
       .then((r) => r.json())
-      .then((d) => { if (alive) setPage(d.configured ? "authorized" : "idle"); })
+      .then((d) => {
+        if (!alive) return;
+        if (d.configured) { setPage("authorized"); return; }
+        // 未配置时回查最近一次 attempt：失败要显式呈现（不能吞成「未登录」），
+        // 进行中则恢复轮询（设置面板往返导致的重挂载不丢登录进度）。
+        fetch("/copilot-auth/state")
+          .then((r) => r.json())
+          .then((s) => {
+            if (!alive) return;
+            setNotices(s.notices ?? []);
+            if (s.status === "failed") {
+              setPage("failed");
+              setError(s.error ?? "未知错误");
+            } else if (s.status === "running") {
+              setPage("running");
+              poll();
+            } else {
+              setPage("idle");
+            }
+          })
+          .catch(() => { if (alive) setPage("idle"); });
+      })
       .catch(() => { if (alive) setPage("idle"); });
     return () => {
       alive = false;
