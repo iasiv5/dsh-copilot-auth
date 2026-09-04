@@ -99,6 +99,16 @@ npm pack --dry-run
 - 每次登录成功或插件启动，会用账号最新发现的可用模型**全量覆盖** GitHub Copilot 路由的模型目录——对目录的手工定制（如模型显示名）会在下次同步时被重置为裸模型 id
 - 模型目录只写入 pi-ai 内置目录已描述的模型：目录快照外的新模型暂不写入（catalog 路由的校验要求模型协议可解析），pi-ai 升级目录后会随同步自动出现
 
+## 维护者发布
+
+本项目使用 npm **Trusted Publishing（GitHub Actions OIDC）** 发布，不在仓库或 GitHub Secrets 中保存 `NPM_TOKEN`。
+
+- 发布 workflow：`.github/workflows/release.yml`
+- 触发方式：推送 `v*` tag，或在 GitHub Actions 手动触发
+- npm Trusted Publisher 配置：GitHub Actions；owner `iasiv5`；repository `dsh-copilot-auth`；workflow filename `release.yml`；environment 留空；允许 `npm publish`
+- workflow 使用 GitHub-hosted runner、`id-token: write`，npm CLI 自动使用 OIDC 并生成 provenance
+- npm Trusted Publisher 是按 package 配置的。首次发布前如果 package 尚不存在，需要先完成 npm 要求的一次性 bootstrap，再在 package settings 中配置 Trusted Publisher；bootstrap 不应通过长期 GitHub secret 实现。详见 [npm Trusted Publishing 文档](https://docs.npmjs.com/trusted-publishers)
+
 ## License
 
 MIT

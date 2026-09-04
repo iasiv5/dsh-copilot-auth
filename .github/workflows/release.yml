@@ -1,22 +1,54 @@
-name: release
+name: Publish to npm (trusted publishing / OIDC)
+
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-      - run: npm ci
-      - run: npm run build
-      - run: npm test
-      - run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org/"
+          package-manager-cache: false
+
+      - name: Install deps (prepare/build toolchain)
+        run: npm ci --no-audit --no-fund
+
+      - name: Ensure npm supports trusted publishing
+        run: |
+          npm install --global npm@latest
+          node --version
+          npm --version
+
+      - name: Check version not already published
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          PKG_NAME=$(node -p "require('./package.json').name")
+          if npm view "$PKG_NAME@$PKG_VERSION" version >/dev/null 2>&1; then
+            echo "::error::$PKG_NAME@$PKG_VERSION already published. Bump version first."
+            exit 1
+          fi
+          echo "Publishing $PKG_NAME@$PKG_VERSION"
+
+      - name: Build and test
+        run: |
+          npm run build
+          npm test
+
+      # npm detects the GitHub OIDC environment and creates a short-lived publish credential.
+      - name: Publish
+        run: npm publish --access public
+
+# Configure this exact publisher in npm package settings:
+# GitHub Actions / iasiv5 / dsh-copilot-auth / release.yml / no environment.
