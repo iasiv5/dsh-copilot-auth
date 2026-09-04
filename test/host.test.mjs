@@ -17,6 +17,7 @@ function makeCtx(script = {}) {
                    readRecord: async (k) => ctx.script.record?.[k],
                    deleteRecordCalls: [], deleteRecord: async (k) => { ctx.credentials.deleteRecordCalls.push(k); ctx.script.record = {}; return true; } },
     settings: { mutateCalls: [], mutate: async (ns, ops) => { ctx.settings.mutateCalls.push({ ns, ops }); } },
+    llm: { listModels: async () => ctx.script.served ?? [] },
     script: { notices: [], record: {}, ...script },
   };
   plugin.apply(ctx, {});
@@ -31,7 +32,7 @@ const call = async (h, req = {}) => { const res = { code: 0, body: null,
 test("插件身份与路由注册", () => {
   const ctx = makeCtx();
   assert.equal(plugin.name, "copilot-auth");
-  assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings"]);
+  assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings", "llm"]);
   assert.ok(ctx.routes.every((r) => r.kind === "exact"), "四条路由必须都是 exact");
   assert.deepEqual(ctx.routes.map((r) => r.path).sort(),
     ["/copilot-auth/logout", "/copilot-auth/start", "/copilot-auth/state", "/copilot-auth/status"]);
@@ -90,9 +91,10 @@ test("status 与 logout 操作固定 credential key", async () => {
   assert.equal(again.body.ok, true);
 });
 
-test("authorized 后把发现的可用模型写入用户 settings 的模型目录", async () => {
+test("authorized 后把发现的可用模型写入用户 settings 的模型目录（目录外 id 排除）", async () => {
   const ctx = makeCtx();
-  ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.6-luna", "gpt-5.4"] } } };
+  ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.6-luna", "gpt-5.4", "gemini-3.8-flash"] } } };
+  ctx.script.served = [{ id: "gpt-5.6-luna" }, { id: "gpt-5.4" }]; // 运行时目录未描述 gemini-3.8-flash
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(ctx.settings.mutateCalls.length, 1);
@@ -103,7 +105,7 @@ test("authorized 后把发现的可用模型写入用户 settings 的模型目�
 });
 
 test("挂载时若已登录同样同步一次模型目录", async () => {
-  const ctx = makeCtx({ record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4"] } } } });
+  const ctx = makeCtx({ record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } }, served: [{ id: "gpt-5.4" }] });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(ctx.settings.mutateCalls.length, 1);
   assert.deepEqual(ctx.settings.mutateCalls[0].ops[0].value, [{ id: "gpt-5.4" }]);
@@ -112,6 +114,7 @@ test("挂载时若已登录同样同步一次模型目录", async () => {
 test("模型同步失败时经 /status 暴露 syncError", async () => {
   const ctx = makeCtx();
   ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } };
+  ctx.script.served = [{ id: "gpt-5.4" }];
   ctx.settings.mutate = async () => { throw new Error("validation boom"); };
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));

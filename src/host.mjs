@@ -3,16 +3,22 @@
 import { CREDENTIAL_KEY, emptyState, routes } from "./shared.mjs";
 
 export const name = "copilot-auth";
-export const inject = ["webServer", "authorization", "credentials", "settings"];
+export const inject = ["webServer", "authorization", "credentials", "settings", "llm"];
 
-// 登录成功（或挂载时已登录）后，把凭据里发现的全部可用模型写入用户 settings
-// 的模型目录——pi-ai 内置目录快照可能落后于账号实际可用模型，这一步保证
-// Models 页与模型选择器开箱即得完整列表（turnkey，用户新增需求 2026-09-04）。
-// 注意：每次登录/挂载会用最新发现列表覆盖该目录，手工定制会被重置。
+// 登录成功（或挂载时已登录）后，把账号可用模型写入用户 settings 的模型目录
+// （turnkey，用户新增需求 2026-09-04）。
+// 数据源取交集：凭据 payload.availableModelIds（账号可用）∩ ctx.llm.listModels
+// （运行时目录已描述）。目录快照外的 id 必须排除——catalog 路由校验要求模型
+// 的 wire 协议可解析（api = 路由设置 ?? 目录条目 ?? 路由共享协议），目录外 id
+// 三者皆空会被整体拒绝；pi-ai 目录更新后它们会自然进入 listModels 集合。
+// 注意：每次登录/挂载会用最新列表覆盖该目录，手工定制会被重置。
 async function syncAvailableModels(ctx) {
   const record = await ctx.credentials.readRecord(CREDENTIAL_KEY);
-  const ids = record?.payload?.availableModelIds;
-  if (!Array.isArray(ids) || ids.length === 0) return;
+  const available = record?.payload?.availableModelIds;
+  if (!Array.isArray(available) || available.length === 0) return;
+  const served = new Set((await ctx.llm.listModels("github-copilot")).map((m) => m?.id).filter(Boolean));
+  const ids = available.filter((id) => served.has(id));
+  if (ids.length === 0) return;
   await ctx.settings.mutate("llm-pi-ai", [
     { op: "set", path: ["providers", "github-copilot", "models"], value: ids.map((id) => ({ id })) },
   ]);
