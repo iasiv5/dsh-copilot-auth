@@ -18,8 +18,9 @@ function makeCtx(script = {}) {
                    deleteRecordCalls: [], deleteRecord: async (k) => { ctx.credentials.deleteRecordCalls.push(k); ctx.script.record = {}; return true; } },
     settings: { mutateCalls: [], mutate: async (ns, ops) => { ctx.settings.mutateCalls.push({ ns, ops }); } },
     llm: { listModels: async () => ctx.script.served ?? [] },
-    script: { notices: [], record: {}, ...script },
+    script: { notices: [], record: {}, configured: undefined, ...script },
   };
+  ctx.settings.get = () => ctx.script.configured;
   plugin.apply(ctx, {});
   return ctx;
 }
@@ -104,11 +105,33 @@ test("authorized 后把发现的可用模型写入用户 settings 的模型目�
   assert.deepEqual(ops[0].value, [{ id: "gpt-5.6-luna" }, { id: "gpt-5.4" }]);
 });
 
-test("挂载时若已登录同样同步一次模型目录", async () => {
+test("挂载不再同步模型目录——即使已登录也不触碰用户 settings", async () => {
   const ctx = makeCtx({ record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } }, served: [{ id: "gpt-5.4" }] });
   await new Promise((r) => setTimeout(r, 10));
-  assert.equal(ctx.settings.mutateCalls.length, 1);
-  assert.deepEqual(ctx.settings.mutateCalls[0].ops[0].value, [{ id: "gpt-5.4" }]);
+  assert.equal(ctx.settings.mutateCalls.length, 0);
+});
+
+test("登录时目录已存在（含空列表）则不写入——用户精简不被重置", async () => {
+  const custom = [{ id: "gpt-5.4" }, { id: "claude-opus-4.8" }, { id: "gemini-3.7-flash" }];
+  for (const models of [custom, []]) {
+    const ctx = makeCtx({
+      record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } },
+      configured: { providers: { "github-copilot": { models } } },
+    });
+    await call(handler(ctx, "/start"), { method: "POST" });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(ctx.settings.mutateCalls.length, 0, `models=${JSON.stringify(models)} 应视作用户所有`);
+  }
+});
+
+test("仅 modelOverrides 也算用户所有，登录不写入", async () => {
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4"] } } },
+    configured: { providers: { "github-copilot": { modelOverrides: { "gpt-5.4": { displayName: "我的 GPT" } } } } },
+  });
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctx.settings.mutateCalls.length, 0);
 });
 
 test("模型同步失败时经 /status 暴露 syncError", async () => {

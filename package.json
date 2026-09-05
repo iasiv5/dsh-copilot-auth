@@ -1,6 +1,6 @@
 {
   "name": "@inventec/dsh-copilot-auth",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Device-code sign-in UI and preconfigured route for the built-in GitHub Copilot provider of DeepSeek Harness (DSH)",
   "type": "module",
   "license": "MIT",

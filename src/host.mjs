@@ -31,17 +31,39 @@ function readCatalogModelIds() {
   return null;
 }
 
-// 登录成功（或挂载时已登录）后，把账号可用模型写入用户 settings 的模型目录
-// （turnkey，用户新增需求 2026-09-04）。
+// 登录成功后，把账号可用模型写入用户 settings 的模型目录
+// （turnkey，用户新增需求 2026-09-04；目录保护，用户反馈 2026-09-05）。
 // 可写集合取交集：凭据 payload.availableModelIds（账号可用）∩ 内置目录已描述。
 // 目录快照外的 id 必须排除——catalog 路由校验要求模型的 wire 协议可解析
 // （api = 路由设置 ?? 目录条目 ?? 路由共享协议），目录外 id 三者皆空会被整体
 // 拒绝；pi-ai 目录更新后它们会自然进入可写集合。
-// 注意：每次登录/挂载会用最新列表覆盖该目录，手工定制会被重置。
+// 目录保护（2026-09-05）：该路由已配置模型目录（models 键存在，含空列表）或
+// modelOverrides 时视作用户所有，同步直接让路——用户在 Models 页精简过的目录
+// 不会被重置。只有目录尚不存在时才填充一次；想重置全量，删掉 settings.yaml
+// 里该路由的 models 列表后重新登录即可。
+
+// 读取解析后的 github-copilot 路由配置（base 层 + 用户层的最终值）。
+// settings 未注入 / 未注册 / 读取失败一律按空处理——回退到可写入分支，
+// 保持既有 turnkey 行为不变。
+function readConfiguredRoute(ctx) {
+  try {
+    const section = ctx.settings?.get?.("llm-pi-ai");
+    return section?.providers?.["github-copilot"] ?? {};
+  } catch {
+    return {};
+  }
+}
+
 async function syncAvailableModels(ctx) {
   const record = await ctx.credentials.readRecord(CREDENTIAL_KEY);
   const available = record?.payload?.availableModelIds;
   if (!Array.isArray(available) || available.length === 0) return;
+  const route = readConfiguredRoute(ctx);
+  const modelsConfigured = route.models !== undefined && route.models !== null;
+  const overridesConfigured = !!route.modelOverrides
+    && typeof route.modelOverrides === "object"
+    && Object.keys(route.modelOverrides).length > 0;
+  if (modelsConfigured || overridesConfigured) return;
   const catalog = readCatalogModelIds();
   let ids;
   if (catalog) {
@@ -90,13 +112,13 @@ export function apply(ctx) {
   let attempt = emptyState();
   let lastSyncError;
 
-  // 挂载时若已登录，同步一次模型目录（凭据持久化在本地，模型列表随账号刷新）。
+  // 模型目录同步只在登录成功后执行（2026-09-05 对齐结论：挂载不再同步）。
+  // 插件启动/重启绝不触碰用户 settings，用户精简过的目录不会被动重置。
   // 失败不静默：错误经 /status 的 syncError 字段暴露，便于诊断。
   const sync = () => syncAvailableModels(ctx).then(() => { lastSyncError = undefined; }).catch((err) => {
     lastSyncError = String(err?.message ?? err);
     ctx.logger?.warn?.("copilot-auth: model sync failed: %s", lastSyncError);
   });
-  void sync();
 
   ctx.webServer.register({
     kind: "exact",
