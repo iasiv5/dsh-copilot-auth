@@ -7,5 +7,7 @@ export const routes = () => ({
   state: `${ROUTE_PREFIX}/state`,
   status: `${ROUTE_PREFIX}/status`,
   logout: `${ROUTE_PREFIX}/logout`,
+  refreshPreview: `${ROUTE_PREFIX}/refresh/preview`,
+  refreshApply: `${ROUTE_PREFIX}/refresh/apply`,
 });
 export const emptyState = () => ({ status: "idle", notices: [], error: undefined });

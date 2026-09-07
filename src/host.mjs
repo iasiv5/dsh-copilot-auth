@@ -1,32 +1,52 @@
-// host 半区：cordis 插件。注册 4 条 exact 路由，把内置 github-copilot 的
-// OAuth 设备码流（ctx.authorization）暴露给 Web client。零 GitHub 协议代码。
+// host 半区：cordis 插件。注册 6 条 exact 路由，把内置 github-copilot 的
+// OAuth 设备码流（ctx.authorization）暴露给 Web client，并提供「手动刷新可用
+// 模型目录」（数据级目录补丁，pi-ai 代码版本不动；只读 GET /models 适配显式
+// 耦合 pi-ai 0.84.4，详见 CONTEXT.md 与 ADR 0001）。
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { CREDENTIAL_KEY, emptyState, routes } from "./shared.mjs";
+import { readJson, writeJsonAtomic, createMutex } from "./atomic-json.mjs";
+import { mergeCatalog, diffModels, digest, findPiAiInstallation } from "./catalog.mjs";
+import { fetchLatestCatalog } from "./catalog-fetch.mjs";
+import { fetchLiveAvailableModelIds } from "./copilot-models.mjs";
+import { loadState, saveState, createJournal, advanceJournal, restartMarker } from "./state.mjs";
 
 export const name = "copilot-auth";
 export const inject = ["webServer", "authorization", "credentials", "settings", "llm"];
 
-// 读取 pi-ai 内置目录的 github-copilot 模型 id → 协议映射。数据文件位于 dsh
-// 安装树内的 @earendil-works/pi-ai；从进程入口（dsh 可执行文件）逐级向上定位，
-// 只读不改。定位/解析失败返回 null（调用方回退 listModels 交集，见下）。
-function readCatalogModelIds() {
+// 内置覆盖层的收割来源版本（Task 7，integrity 记录于 README「模型目录刷新」章节）
+const OVERLAY_SOURCE_VERSION = "0.85.1";
+
+// pi-ai 目录数据文件定位层（从 readCatalogModelIds 拆出，行为不变）：
+// 从进程入口（dsh 可执行文件）逐级向上找 node_modules/@earendil-works/pi-ai。
+function findCatalogFile() {
   try {
     let dir = dirname(realpathSync(process.argv?.[1] ?? ""));
     for (let depth = 0; depth < 8; depth++) {
       const dataFile = join(dir, "node_modules", "@earendil-works", "pi-ai", "dist", "providers", "data", "github-copilot.json");
-      if (existsSync(dataFile)) {
-        const data = JSON.parse(readFileSync(dataFile, "utf8"));
-        const byId = {};
-        for (const [api, section] of Object.entries(data)) {
-          for (const id of Object.keys(section ?? {})) byId[id] ??= api;
-        }
-        return byId;
-      }
+      if (existsSync(dataFile)) return dataFile;
       const parent = dirname(dir);
       if (parent === dir) return null;
       dir = parent;
     }
+  } catch { /* 安装树结构变化时回退 */ }
+  return null;
+}
+
+// 读取 pi-ai 内置目录的 github-copilot 模型 id → 协议映射。只读不改。
+// 定位/解析失败返回 null（调用方回退 listModels 交集，见下）。
+function readCatalogModelIds() {
+  try {
+    const dataFile = findCatalogFile();
+    if (!dataFile) return null;
+    const data = JSON.parse(readFileSync(dataFile, "utf8"));
+    const byId = {};
+    for (const [api, section] of Object.entries(data)) {
+      for (const id of Object.keys(section ?? {})) byId[id] ??= api;
+    }
+    return byId;
   } catch { /* 安装树结构变化时回退 */ }
   return null;
 }
@@ -107,10 +127,155 @@ function guard(req, res, method) {
   return true;
 }
 
-export function apply(ctx) {
+// ==================== 模型目录手动刷新（数据级目录补丁，ADR 0001） ====================
+
+class InvalidModeError extends Error {}
+
+const defaultStateFile = () => join(homedir(), ".dsh", "copilot-auth-state.json");
+const defaultOverlayFile = () => fileURLToPath(new URL("./catalog-overlay.json", import.meta.url));
+
+// 字面量 body 直接用（测试）；否则按流读并 JSON.parse
+function readBody(req) {
+  if (req.body !== undefined) return Promise.resolve(req.body);
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      if (chunks.length === 0) return resolve(undefined);
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch (err) {
+        reject(err);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+// 版本与 catalog 同根解析（R3-8）：注入 catalogFile 时 version 取其所在根的
+// package.json（opts.piAiVersion 为测试钩子）；生产走 findPiAiInstallation()。
+function resolveInstall(opts) {
+  if (opts.catalogFile) {
+    if (opts.piAiVersion) return { catalogFile: opts.catalogFile, version: opts.piAiVersion };
+    const root = dirname(dirname(dirname(dirname(opts.catalogFile))));
+    const packageJsonFile = join(root, "package.json");
+    const pkg = JSON.parse(readFileSync(packageJsonFile, "utf8"));
+    return { catalogFile: opts.catalogFile, packageJsonFile, version: pkg.version };
+  }
+  const found = findPiAiInstallation();
+  if (!found) throw new Error("pi-ai installation not found");
+  return found;
+}
+
+function readLocalCatalog(opts) {
+  const file = resolveInstall(opts).catalogFile;
+  const bytes = readFileSync(file);
+  return { file, bytes, catalog: JSON.parse(bytes.toString("utf8")) };
+}
+
+// 账号可用模型：现场拉取（显式耦合 0.84.4）→ 任何失败回退凭证缓存 availableModelIds
+async function resolveAvailable(ctx, fetchImpl) {
+  const record = await ctx.credentials.readRecord(CREDENTIAL_KEY);
+  const payload = record?.payload ?? {};
+  if (payload.access) {
+    try {
+      return { ids: await fetchLiveAvailableModelIds({ credential: payload, fetchImpl }), source: "live" };
+    } catch { /* 回退 cache */ }
+  }
+  return { ids: Array.isArray(payload.availableModelIds) ? payload.availableModelIds : [], source: "cache" };
+}
+
+// R3-3 严格分支：仅 mode==="overlay" 读内置覆盖层；normal npm 失败只回
+// catalogSource:"local"（绝不隐式读 overlay）；未知 mode → 400。
+async function resolveCatalogSource(opts, mode, fetchImpl) {
+  if (mode === "overlay") {
+    const catalog = readJson(opts.overlayFile ?? defaultOverlayFile());
+    if (catalog === undefined) throw new Error("bundled overlay file missing");
+    return {
+      catalog,
+      catalogSource: "overlay",
+      catalogError: null,
+      provenance: { kind: "overlay", piAiVersion: OVERLAY_SOURCE_VERSION, integrity: null },
+    };
+  }
+  if (mode !== undefined && mode !== "latest") throw new InvalidModeError(String(mode));
+  try {
+    const r = await fetchLatestCatalog({ fetchImpl });
+    return {
+      catalog: r.catalog,
+      catalogSource: "latest",
+      catalogError: null,
+      provenance: { kind: "latest", piAiVersion: r.piAiVersion, integrity: r.integrity },
+    };
+  } catch (error) {
+    return {
+      catalog: readLocalCatalog(opts).catalog,
+      catalogSource: "local",
+      catalogError: String(error?.message ?? error),
+      provenance: { kind: "local" },
+    };
+  }
+}
+
+// settings raw user 层完整配置视图（R3-2）：digest/baseline/CAS 的唯一取数面。
+// 缺席一律 null 占位（非 undefined），保证 journal JSON 持久化无损、boot 重载后
+// 与现算视图可逐字节比较；「未配置 vs 显式空」由 *Present 标志区分。
+function rawSettingsView(ctx) {
+  let route = {};
+  try {
+    const d = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
+    const user = d?.user;
+    if (user && typeof user === "object" && !Array.isArray(user)) {
+      const r = user.providers?.["github-copilot"];
+      if (r && typeof r === "object" && !Array.isArray(r)) route = r;
+    }
+  } catch { /* settings 未注入/未注册/读取失败一律按空视图 */ }
+  const modelsPresent = route.models !== undefined && route.models !== null;
+  const modelOverridesPresent = route.modelOverrides !== undefined && route.modelOverrides !== null;
+  return {
+    modelsPresent,
+    models: modelsPresent ? route.models : null,
+    modelOverridesPresent,
+    modelOverrides: modelOverridesPresent ? route.modelOverrides : null,
+  };
+}
+
+// preview 与 apply 共享的输入计算——digest 绑定的正确性依赖两侧走同一代码路径。
+async function computeRefreshInputs(ctx, opts, mode) {
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch?.bind(globalThis);
+  const { ids, source } = await resolveAvailable(ctx, fetchImpl);
+  const local = readLocalCatalog(opts);
+  const resolved = await resolveCatalogSource(opts, mode, fetchImpl);
+  const merged = mergeCatalog(local.catalog, resolved.catalog);
+  const catalogIds = new Set(Object.values(merged.merged).flatMap((s) => Object.keys(s ?? {})));
+  const view = rawSettingsView(ctx);
+  const currentIds = Array.isArray(view.models)
+    ? view.models.map((m) => m?.id).filter((x) => typeof x === "string")
+    : [];
+  const diff = diffModels(currentIds, ids, catalogIds);
+  const customizationReset = {
+    modelEntryIds: (Array.isArray(view.models) ? view.models : [])
+      .filter((m) => m && typeof m === "object" && Object.keys(m).some((k) => k !== "id"))
+      .map((m) => m.id),
+    modelOverrideIds:
+      view.modelOverrides && typeof view.modelOverrides === "object" && !Array.isArray(view.modelOverrides)
+        ? Object.keys(view.modelOverrides)
+        : [],
+  };
+  const digests = {
+    settings: digest(view), // raw 完整视图：字段级变化必漂移（R3-2）
+    available: digest([...ids].sort()),
+    catalog: digest(local.bytes), // 本地目录文件字节
+    remote: digest(resolved.catalog), // 实际使用的目录来源对象（与 mode 严格对应）
+  };
+  return { view, ids, source, local, resolved, merged, diff, customizationReset, digests };
+}
+
+export function apply(ctx, opts = {}) {
   const r = routes();
   let attempt = emptyState();
   let lastSyncError;
+  const refreshMutex = createMutex(); // 宿主单进程内互斥（不支持多实例，见 README）
 
   // 模型目录同步只在登录成功后执行（2026-09-05 对齐结论：挂载不再同步）。
   // 插件启动/重启绝不触碰用户 settings，用户精简过的目录不会被动重置。
@@ -200,6 +365,123 @@ export function apply(ctx) {
       // 真实删除与否由随后的 /status 反映。
       await ctx.credentials.deleteRecord(CREDENTIAL_KEY);
       json(res, 200, { ok: true });
+    },
+  });
+
+  // 手动刷新可用模型目录 · preview：只读，返回 diff + customizationReset + digest 组。
+  // body 可带 { "mode": "overlay" } 用内置覆盖层出 diff（离线 bootstrap）。
+  ctx.webServer.register({
+    kind: "exact",
+    path: r.refreshPreview,
+    handler: async (req, res) => {
+      if (!guard(req, res, "POST")) return;
+      let body;
+      try {
+        body = await readBody(req);
+      } catch {
+        json(res, 400, { ok: false, error: "bad-body" });
+        return;
+      }
+      const mode = body?.mode;
+      if (mode !== undefined && mode !== "latest" && mode !== "overlay") {
+        json(res, 400, { ok: false, error: "invalid-mode" });
+        return;
+      }
+      try {
+        const inputs = await computeRefreshInputs(ctx, opts, mode);
+        json(res, 200, {
+          ok: true,
+          source: inputs.source,
+          catalogSource: inputs.resolved.catalogSource,
+          catalogError: inputs.resolved.catalogError,
+          skipped: inputs.merged.skipped,
+          added: inputs.diff.added,
+          removed: inputs.diff.removed,
+          kept: inputs.diff.kept,
+          target: inputs.diff.target,
+          customizationReset: inputs.customizationReset,
+          digests: inputs.digests,
+        });
+      } catch (err) {
+        if (err instanceof InvalidModeError) {
+          json(res, 400, { ok: false, error: "invalid-mode" });
+          return;
+        }
+        json(res, 500, { ok: false, error: String(err?.message ?? err) });
+      }
+    },
+  });
+
+  // 手动刷新 · apply：mutex 内重算全部输入 digest 与回传比对（漂移 → 409
+  // preview-stale，client 重新 preview）；一致则 write-ahead：journal(prepared)
+  // → 原子提交目录 → 合入 appliedOverlay + activated → journal 推进 committed。
+  // 重启 dsh web 后由启动序列把 settings 目录镜像重建为 target（见 boot 序列）。
+  ctx.webServer.register({
+    kind: "exact",
+    path: r.refreshApply,
+    handler: async (req, res) => {
+      if (!guard(req, res, "POST")) return;
+      let body;
+      try {
+        body = await readBody(req);
+      } catch {
+        json(res, 400, { ok: false, error: "bad-body" });
+        return;
+      }
+      const mode = body?.mode;
+      if (mode !== undefined && mode !== "latest" && mode !== "overlay") {
+        json(res, 400, { ok: false, error: "invalid-mode" });
+        return;
+      }
+      try {
+        const out = await refreshMutex(async () => {
+          const inputs = await computeRefreshInputs(ctx, opts, mode);
+          const got = body?.digests ?? {};
+          for (const k of ["settings", "available", "catalog", "remote"]) {
+            if (got[k] !== inputs.digests[k]) {
+              return { code: 409, payload: { ok: false, error: "preview-stale" } };
+            }
+          }
+          // digest 全部一致后才解析版本（写入失败点上移，500 不留 journal）
+          const install = resolveInstall(opts);
+          const stateFile = opts.stateFile ?? defaultStateFile();
+          const patchedBytes = Buffer.from(JSON.stringify(inputs.merged.merged, null, 2) + "\n", "utf8");
+          let state = loadState(stateFile);
+          state.journal = createJournal({
+            settingsBaseline: inputs.view,
+            targetIds: inputs.diff.target,
+            pendingOverlay: inputs.merged.addedOverlay, // catalog-shaped 增量（R3-4）
+            appliedAgainstPiAiVersion: install.version,
+            catalogBaselineDigest: inputs.digests.catalog,
+            patchedCatalogDigest: digest(patchedBytes),
+            source: inputs.resolved.provenance,
+          });
+          saveState(stateFile, state); // ① write-ahead：prepared
+          writeJsonAtomic(install.catalogFile, inputs.merged.merged); // ② 目录原子提交
+          state = loadState(stateFile);
+          state.appliedOverlay = mergeCatalog(state.appliedOverlay, inputs.merged.addedOverlay).merged;
+          state.appliedProvenance = {
+            sourcePiAiVersion: inputs.resolved.provenance.piAiVersion ?? null,
+            integrity: inputs.resolved.provenance.integrity ?? null,
+            appliedAgainstPiAiVersion: install.version,
+            catalogSchemaVersion: 1,
+          };
+          state.activated = true;
+          state.restartState = restartMarker("refresh", digest(state.appliedOverlay));
+          saveState(stateFile, state); // ③ appliedOverlay/activated 落盘
+          state = loadState(stateFile);
+          state.journal = advanceJournal(state.journal);
+          saveState(stateFile, state); // ④ 相位推进 catalog-committed-needs-restart
+          return { code: 200, payload: { ok: true, restartRequired: true } };
+        });
+        json(res, out.code, out.payload);
+      } catch (err) {
+        if (err instanceof InvalidModeError) {
+          json(res, 400, { ok: false, error: "invalid-mode" });
+          return;
+        }
+        json(res, 500, { ok: false, error: String(err?.message ?? err) });
+      }
     },
   });
 }

@@ -1,0 +1,11 @@
+{
+  "openai-completions": {
+    "gpt-a": {
+      "id": "gpt-a",
+      "api": "openai-completions",
+      "provider": "github-copilot",
+      "contextWindow": 100000,
+      "maxTokens": 4096
+    }
+  }
+}
