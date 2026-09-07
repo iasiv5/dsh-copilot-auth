@@ -170,7 +170,10 @@ const styles = {
   banner: { margin: 0, fontSize: 13, lineHeight: "20px", color: "#f59f00" },
   modalMask: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000,
     display: "flex", alignItems: "center", justifyContent: "center", padding: 24 },
-  modal: { background: "var(--dsh-bg, #fff)", color: "inherit", borderRadius: 12, maxWidth: 560, width: "100%",
+  // 背景/文字与壳 body 用同一对 dsw 令牌（--dsw-alias-bg-base / label-primary），
+  // 深/浅主题自动一致——勿用不存在的变量名 fallback（曾致深色主题白底白字）
+  modal: { background: "var(--dsw-alias-bg-base, #fff)", color: "var(--dsw-alias-label-primary, inherit)",
+    border: "1px solid rgba(128,128,128,0.35)", borderRadius: 12, maxWidth: 560, width: "100%",
     maxHeight: "80vh", overflowY: "auto", padding: "18px 20px", display: "flex", flexDirection: "column", gap: 10,
     boxShadow: "0 8px 32px rgba(0,0,0,0.35)" },
   modalTitle: { margin: 0, fontSize: 15, fontWeight: 600 },
