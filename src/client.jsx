@@ -170,8 +170,8 @@ const styles = {
   banner: { margin: 0, fontSize: 13, lineHeight: "20px", color: "#f59f00" },
   modalMask: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1000,
     display: "flex", alignItems: "center", justifyContent: "center", padding: 24 },
-  // 背景/文字与壳 body 用同一对 dsw 令牌（--dsw-alias-bg-base / label-primary），
-  // 深/浅主题自动一致——勿用不存在的变量名 fallback（曾致深色主题白底白字）
+  // 弹窗背景/文字由 sampleThemeSurface() 在渲染时采样覆盖（皮肤可能把 bg-base
+  // 做成半透明磨砂，弹窗必须不透明）；此处仅为兜底
   modal: { background: "var(--dsw-alias-bg-base, #fff)", color: "var(--dsw-alias-label-primary, inherit)",
     border: "1px solid rgba(128,128,128,0.35)", borderRadius: 12, maxWidth: 560, width: "100%",
     maxHeight: "80vh", overflowY: "auto", padding: "18px 20px", display: "flex", flexDirection: "column", gap: 10,
@@ -189,12 +189,25 @@ const styles = {
 
 const badgeColor = { idle: "#adb5bd", running: "#f59f00", authorized: "#37b24d", failed: "#e03131", loading: "#adb5bd" };
 
+// 主题表面色采样：取 body 计算背景并剥掉 alpha——皮肤可能把 bg-base 做成半透明
+// 磨砂（凡人修仙传 BEAUTY 即 rgba(18,18,26,0.35)），弹窗叠在遮罩上必须不透明；
+// 文字色直接用 body 计算色。一次性采样，主题切换后重挂载即刷新。
+function sampleThemeSurface() {
+  if (typeof document === "undefined") return { bg: "#fff", fg: "inherit" };
+  const cs = getComputedStyle(document.body);
+  const m = cs.backgroundColor.match(/rgba?\(([^)]+)\)/);
+  const bg = m ? `rgb(${m[1].split(",").slice(0, 3).join(",")})` : "#fff";
+  return { bg, fg: cs.color || "inherit" };
+}
+
 // 刷新弹窗：消费 refresh-flow 状态机的 confirming 态（preview 数据）。
 // 渲染 added（绿）/removed（红）/kept 计数/skipped（黄，如有）/customizationReset
 // 名单/source 提示/三条风险文案；catalogSource==="local" 时展示 overlayBtn
 //（点击 = 发 mode:"overlay" 的新 preview，不直接 apply，R2-5）。
 function RefreshModal({ t, flow, onConfirm, onCancel, onOverlay }) {
   const p = flow.preview;
+  const surface = useRef(null);
+  if (!surface.current) surface.current = sampleThemeSurface();
   const sourceKeys = [
     p.source === "live" ? "srcLive" : "srcCache",
     p.catalogSource === "latest" ? "srcLatest" : p.catalogSource === "overlay" ? "srcOverlay" : "srcLocal",
@@ -211,7 +224,7 @@ function RefreshModal({ t, flow, onConfirm, onCancel, onOverlay }) {
   ];
   return (
     <div style={styles.modalMask} role="dialog" aria-modal="true">
-      <div style={styles.modal}>
+      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg }}>
         <h4 style={styles.modalTitle}>{t("refreshTitle")}</h4>
         <p style={styles.modalText}>{t("refreshDesc")}</p>
         {flow.staleNotice && <p style={styles.banner}>⚠ {t("stalePreview")}</p>}
