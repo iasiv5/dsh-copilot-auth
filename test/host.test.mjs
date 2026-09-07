@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, renameSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -21,14 +21,45 @@ function makeCtx(script = {}, opts = {}) {
     credentials: { describeRecord: async (k) => ({ configured: ctx.script.record?.[k] !== undefined }),
                    readRecord: async (k) => ctx.script.record?.[k],
                    deleteRecordCalls: [], deleteRecord: async (k) => { ctx.credentials.deleteRecordCalls.push(k); ctx.script.record = {}; return true; } },
-    settings: { mutateCalls: [], mutate: async (ns, ops, expectedRevision) => { ctx.settings.mutateCalls.push({ ns, ops, expectedRevision }); },
-                describe: () => (ctx.script.descriptor === null ? [] : [{ ns: "llm-pi-ai", revision: ctx.script.revision ?? 1, user: ctx.script.userLayer }]) },
+    settings: { mutateCalls: [], describeCalls: 0,
+                mutate: async (ns, ops, expectedRevision) => {
+                  ctx.settings.mutateCalls.push({ ns, ops, expectedRevision });
+                  if (ctx.script.mutateError) throw new Error(ctx.script.mutateError);
+                  if (ctx.script.mutateConflict || (expectedRevision !== undefined && expectedRevision !== (ctx.script.revision ?? 1))) {
+                    const e = new Error(`settings conflict: expected ${expectedRevision}, actual ${ctx.script.revision ?? 1}`);
+                    e.code = "SETTINGS_CONFLICT";
+                    throw e;
+                  }
+                  if (ctx.script.applyOps) {
+                    const doc = (ctx.script.userLayer ??= {});
+                    for (const op of ops) {
+                      let node = doc;
+                      for (let i = 0; i < op.path.length - 1; i++) node = (node[op.path[i]] ??= {});
+                      if (op.op === "set") node[op.path.at(-1)] = op.value;
+                      else delete node[op.path.at(-1)];
+                    }
+                    ctx.script.revision = (ctx.script.revision ?? 1) + 1;
+                  }
+                },
+                describe: () => {
+                  ctx.settings.describeCalls++;
+                  if (ctx.script.descriptor === null) return [];
+                  const revision = ctx.script.revision ?? 1;
+                  // 并发写注入钩子：describe 返回后、mutate 前让 revision 过期
+                  if (ctx.script.bumpAfterDescribe) ctx.script.revision = revision + 1;
+                  return [{ ns: "llm-pi-ai", revision, user: ctx.script.userLayer }];
+                } },
     llm: { listModels: async () => ctx.script.served ?? [] },
     script: { notices: [], record: {}, configured: undefined, userLayer: undefined, ...script },
     opts,
   };
   ctx.settings.get = () => ctx.script.configured;
-  plugin.apply(ctx, opts);
+  // 默认隔离：未显式注入 stateFile 时给临时文件，测试绝不触碰真实 ~/.dsh 状态
+  let bootDone;
+  ctx.bootReady = new Promise((r) => { bootDone = r; });
+  const effectiveOpts = { stateFile: join(mkdtempSync(join(tmpdir(), "host-state-")), "state.json"), onBootDone: bootDone, ...opts };
+  ctx.opts = effectiveOpts;
+  plugin.apply(ctx, effectiveOpts);
   return ctx;
 }
 const handler = (ctx, suffix) => ctx.routes.find((r) => r.path.endsWith(suffix)).handler;
@@ -426,4 +457,317 @@ test("apply 并发：mutex 串行，第二个因 catalog 已变 409；500 后后
   renameSync(inst2.packageJsonFile + ".bak", inst2.packageJsonFile);
   const f2 = await call(handler(ctx2, "/refresh/apply"), { method: "POST", body: { mode: "overlay", digests: p2v.body.digests } });
   assert.equal(f2.code, 200, "mutex 拒绝后不中毒，后续任务照常执行");
+});
+
+// ==================== Task 9: 启动序列（prepared 恢复 / 激活门 / 自愈 / 真 CAS） ====================
+
+import { freshState, createJournal, advanceJournal, restartMarker } from "../src/state.mjs";
+import { digest } from "../src/catalog.mjs";
+
+const tick = () => {}; // 保留占位：Task 9 起一律 await ctx.bootReady（确定性等待 boot settle）
+const loadStateFile = (f) => JSON.parse(readFileSync(f, "utf8"));
+
+function overlayEntry() {
+  return JSON.parse(JSON.stringify(OVERLAY)); // 防跨用例串改
+}
+
+// 构造 journal（默认 prepared；committed=true 时推进到 catalog-committed-needs-restart）
+function makeJournal(inst, { committed = false, baseline, targetIds = ["gpt-a", "gpt-b"], against = "0.84.4" } = {}) {
+  const j = createJournal({
+    settingsBaseline: baseline,
+    targetIds,
+    pendingOverlay: overlayEntry(),
+    appliedAgainstPiAiVersion: against,
+    catalogBaselineDigest: digest(readFileSync(inst.catalogFile)),
+    patchedCatalogDigest: digest(Buffer.from(JSON.stringify(mergeFixture(), null, 2) + "\n", "utf8")),
+    source: { kind: "overlay", piAiVersion: "0.85.1", integrity: null },
+  });
+  return committed ? advanceJournal(j) : j;
+}
+
+// fixture + overlay 合并后的目录对象
+function mergeFixture() {
+  return { "openai-completions": { ...JSON.parse(FIXTURE_0844)["openai-completions"], "gpt-b": overlayEntry()["openai-completions"]["gpt-b"] } };
+}
+
+// 把已打补丁的目录写到安装树（模拟「目录已 rename」的崩溃现场）
+function writePatchedCatalog(inst) {
+  writeFileSync(inst.catalogFile, JSON.stringify(mergeFixture(), null, 2) + "\n");
+}
+
+const BASELINE = { modelsPresent: true, models: [{ id: "gpt-a" }], modelOverridesPresent: false, modelOverrides: null };
+const baselineUserLayer = () => ({ providers: { "github-copilot": { models: [{ id: "gpt-a" }] } } }); // 工厂：applyOps 用例会就地改写 userLayer，禁止共享可变夹具
+const PROVENANCE_0844 = { sourcePiAiVersion: "0.85.1", integrity: null, appliedAgainstPiAiVersion: "0.84.4", catalogSchemaVersion: 1 };
+
+test("R2-1 注入点①：journal=prepared 已写、目录未 rename → 启动幂等补全，本 boot 不同步 settings", async () => {
+  const inst = makeInstall();
+  const state = { ...freshState(), journal: makeJournal(inst, { baseline: BASELINE }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  const catalog = JSON.parse(readFileSync(inst.catalogFile, "utf8"));
+  assert.ok(catalog["openai-completions"]["gpt-b"], "目录补齐 pendingOverlay");
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.activated, true, "恢复先于激活门：activated=false 也补全");
+  assert.equal(after.journal.phase, "catalog-committed-needs-restart");
+  assert.equal(after.restartState.reason, "refresh");
+  assert.equal(ctx.settings.mutateCalls.length, 0, "本 boot 写了目录 → 禁止 settings 同步");
+});
+
+test("R2-1 注入点②：目录已 rename、appliedOverlay/activated 未存 → 启动幂等补全并推进", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst); // 目录已提交
+  const state = { ...freshState(), journal: makeJournal(inst, { baseline: BASELINE }) }; // activated=false, appliedOverlay={}
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer(), applyOps: true }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.activated, true);
+  assert.deepEqual(after.appliedOverlay, overlayEntry(), "appliedOverlay 补存");
+  assert.equal(after.journal, null, "目录上 boot 已就绪 → CAS 同 boot 消费 journal");
+  assert.equal(ctx.settings.mutateCalls.length, 1, "目录在上一崩溃 boot 已写入，本 boot 同步安全");
+  assert.deepEqual(ctx.script.userLayer.providers["github-copilot"].models, [{ id: "gpt-a" }, { id: "gpt-b" }]);
+});
+
+test("R2-1 注入点③：activated 已存但相位未推进 → 启动推进并消费", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst);
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, journal: makeJournal(inst, { baseline: BASELINE }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer(), applyOps: true }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal, null);
+  assert.equal(after.activated, true);
+  assert.equal(after.lastError, null);
+  assert.equal(ctx.settings.mutateCalls.length, 1);
+});
+
+test("R3-1：prepared 恢复先过兼容 gate——跨版本 → prepared-incompatible，目录零写入、journal 保留", async () => {
+  const inst = makeInstall();
+  const before = readFileSync(inst.catalogFile);
+  const state = { ...freshState(), journal: makeJournal(inst, { baseline: BASELINE, against: "0.84.4" }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor(), piAiVersion: "0.85.0" });
+  await ctx.bootReady;
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入");
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal.phase, "prepared", "journal 保留可重试");
+  assert.match(after.lastError, /prepared-incompatible/);
+  const status = await call(handler(ctx, "/status"));
+  assert.match(status.body.refresh.lastError, /prepared-incompatible/);
+});
+
+test("R9：未激活 + 本地目录缺条目 + 无 journal → 启动不写目录、不落状态文件", async () => {
+  const inst = makeInstall();
+  const before = readFileSync(inst.catalogFile);
+  const ctx = makeCtx({}, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.deepEqual(readFileSync(inst.catalogFile), before);
+  assert.equal(existsSync(inst.stateFile), false);
+});
+
+test("R7：已激活 + appliedOverlay 条目缺失 + 同基线 → 自愈重放，restartState=self-heal，本 boot 不同步 settings", async () => {
+  const inst = makeInstall();
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844 };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  const catalog = JSON.parse(readFileSync(inst.catalogFile, "utf8"));
+  assert.ok(catalog["openai-completions"]["gpt-b"], "自愈重放写目录");
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.restartState.reason, "self-heal");
+  assert.equal(ctx.settings.mutateCalls.length, 0, "本 boot 禁止 settings 同步（R7）");
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.body.refresh.pendingRestart, true);
+});
+
+test("R2-2 + R3-5：跨 boot restartState 清除——单独存在时不触碰 describe/mutate", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst);
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, restartState: restartMarker("self-heal", digest(overlayEntry())) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const before = readFileSync(inst.catalogFile);
+  const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "本 boot 无目录写入");
+  assert.equal(ctx.settings.describeCalls, 0, "restartState 单独存在时不得调 describe");
+  assert.equal(ctx.settings.mutateCalls.length, 0);
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.restartState, null, "expected entries 已在目录 → 仅清 restartState");
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.body.refresh.pendingRestart, false);
+});
+
+test("兼容 gate：跨版本且条目已原生存在 → 空操作；有缺失 → self-heal-incompatible 不写安装树", async () => {
+  // ① 条目已原生存在 → 空操作
+  let inst = makeInstall();
+  writePatchedCatalog(inst);
+  let state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844 };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  let ctx = makeCtx({}, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor(), piAiVersion: "0.85.0" });
+  await ctx.bootReady;
+  let after = loadStateFile(inst.stateFile);
+  assert.equal(after.lastError, null, "条目已原生存在 → 空操作不报错");
+  // ② 有缺失 → 不写安装树 + self-heal-incompatible
+  inst = makeInstall();
+  const before = readFileSync(inst.catalogFile);
+  state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844 };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  ctx = makeCtx({}, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor(), piAiVersion: "0.85.0" });
+  await ctx.bootReady;
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "跨版本有缺失不写安装树");
+  after = loadStateFile(inst.stateFile);
+  assert.match(after.lastError, /self-heal-incompatible/);
+  const status = await call(handler(ctx, "/status"));
+  assert.match(status.body.refresh.lastError, /self-heal-incompatible/);
+});
+
+test("R2-3 真 CAS：baseline 匹配 → mutate 携带 expectedRevision=7 并消费 journal", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst);
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, journal: makeJournal(inst, { committed: true, baseline: BASELINE }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer(), revision: 7, applyOps: true }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.equal(ctx.settings.mutateCalls.length, 1);
+  const { ns, ops, expectedRevision } = ctx.settings.mutateCalls[0];
+  assert.equal(ns, "llm-pi-ai");
+  assert.equal(expectedRevision, 7, "真 CAS：携带 describe 读到的 revision");
+  assert.deepEqual(ops, [
+    { op: "set", path: ["providers", "github-copilot", "models"], value: [{ id: "gpt-a" }, { id: "gpt-b" }] },
+    { op: "unset", path: ["providers", "github-copilot", "modelOverrides"] },
+  ]);
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal, null, "成功消费 journal");
+  assert.equal(after.lastError, null);
+});
+
+test("R2-3：mutate 抛 SETTINGS_CONFLICT → journal 保留、lastError=conflict、状态不删除", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst);
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, journal: makeJournal(inst, { committed: true, baseline: BASELINE }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer(), revision: 7, mutateConflict: true }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal.phase, "catalog-committed-needs-restart", "冲突保留 journal");
+  assert.match(after.lastError, /conflict/);
+});
+
+test("并发写注入：describe 之后 revision 过期 → 本次同步被拒绝且不覆盖", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst);
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, journal: makeJournal(inst, { committed: true, baseline: BASELINE }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const before = baselineUserLayer();
+  const ctx = makeCtx({ userLayer: baselineUserLayer(), revision: 7, bumpAfterDescribe: true }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.equal(ctx.settings.mutateCalls.length, 1);
+  assert.equal(ctx.settings.mutateCalls[0].expectedRevision, 7);
+  assert.deepEqual(ctx.script.userLayer, before, "冲突时用户层未被覆盖");
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal.phase, "catalog-committed-needs-restart");
+  assert.match(after.lastError, /conflict/);
+});
+
+test("R2-4：仅 modelOverrides 的初始配置 → 同一 mutate 内 set models + unset modelOverrides", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst);
+  const baseline = { modelsPresent: false, models: null, modelOverridesPresent: true, modelOverrides: { "gpt-a": { displayName: "X" } } };
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, journal: makeJournal(inst, { committed: true, baseline, targetIds: ["gpt-a", "gpt-b"] }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: { providers: { "github-copilot": { modelOverrides: { "gpt-a": { displayName: "X" } } } } }, applyOps: true }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.equal(ctx.settings.mutateCalls.length, 1);
+  const ops = ctx.settings.mutateCalls[0].ops;
+  assert.deepEqual(ops, [
+    { op: "set", path: ["providers", "github-copilot", "models"], value: [{ id: "gpt-a" }, { id: "gpt-b" }] },
+    { op: "unset", path: ["providers", "github-copilot", "modelOverrides"] },
+  ], "models 与 modelOverrides 在同一 mutate 内 set/unset");
+  const route = ctx.script.userLayer.providers["github-copilot"];
+  assert.deepEqual(route.models, [{ id: "gpt-a" }, { id: "gpt-b" }]);
+  assert.equal(route.modelOverrides, undefined, "modelOverrides 被 unset");
+  assert.equal(loadStateFile(inst.stateFile).journal, null);
+});
+
+test("Y1：empty target → mutate value 为 []", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst);
+  const baseline = { modelsPresent: true, models: [{ id: "gpt-dead" }], modelOverridesPresent: false, modelOverrides: null };
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, journal: makeJournal(inst, { committed: true, baseline, targetIds: [] }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: { providers: { "github-copilot": { models: [{ id: "gpt-dead" }] } } }, applyOps: true }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.equal(ctx.settings.mutateCalls.length, 1);
+  assert.deepEqual(ctx.settings.mutateCalls[0].ops[0], { op: "set", path: ["providers", "github-copilot", "models"], value: [] });
+});
+
+test("幂等：当前配置已等于 target 形状 → 消费 journal 不再 mutate", async () => {
+  const inst = makeInstall();
+  writePatchedCatalog(inst);
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, journal: makeJournal(inst, { committed: true, baseline: BASELINE }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: { providers: { "github-copilot": { models: [{ id: "gpt-a" }, { id: "gpt-b" }] } } } }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.equal(ctx.settings.mutateCalls.length, 0, "已是 target → 幂等消费不 mutate");
+  assert.equal(loadStateFile(inst.stateFile).journal, null);
+});
+
+test("Y2-3 语义前置：目录被无害重格式化（字节变、条目全在）→ whole-file digest 不符也照常同步", async () => {
+  const inst = makeInstall();
+  // 重格式化：4 空格缩进（与 makeJournal 计算的 patchedCatalogDigest 不符）
+  writeFileSync(inst.catalogFile, JSON.stringify(mergeFixture(), null, 4) + "\n");
+  const journal = makeJournal(inst, { committed: true, baseline: BASELINE }); // patchedCatalogDigest 基于 2 空格
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, journal };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer(), applyOps: true }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.equal(ctx.settings.mutateCalls.length, 1, "语义前置（targetIds 全部可解析）通过即同步，不看 whole-file digest");
+  assert.equal(loadStateFile(inst.stateFile).journal, null);
+});
+
+test("targetIds 目录不可解析 → 语义前置拒绝同步，journal 保留", async () => {
+  // 现实场景：local 模式 apply（addedOverlay 为空）后目录文件被手动还原——
+  // appliedOverlay 空 → 自愈无事可做，CAS 语义前置必须拦住不可解析的 targetIds
+  const inst = makeInstall(); // 目录未打补丁：gpt-b 不可解析
+  const state = { ...freshState(), activated: true, appliedOverlay: {}, appliedProvenance: PROVENANCE_0844, journal: makeJournal(inst, { committed: true, baseline: BASELINE }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.equal(ctx.settings.mutateCalls.length, 0);
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal.phase, "catalog-committed-needs-restart");
+  assert.match(after.lastError, /unresolvable/);
+});
+
+test("state-corrupt：损坏状态隔离，/status.refresh.lastError=state-corrupt 且激活丢失（自愈停用）", async () => {
+  const inst = makeInstall();
+  writeFileSync(inst.stateFile, "{corrupted");
+  const ctx = makeCtx({}, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.body.refresh.lastError, "state-corrupt");
+  assert.equal(status.body.refresh.activated, false);
+  const quarantined = readdirSync(inst.dir).filter((n) => n.includes(".corrupt-"));
+  assert.equal(quarantined.length, 1, "损坏文件改名留存");
+});
+
+test("/status.refresh 扩展字段：activated/pendingRestart/phase/piAiVersion/catalogDigest/catalogFile", async () => {
+  const inst = makeInstall();
+  const state = { ...freshState(), activated: true, appliedOverlay: overlayEntry(), appliedProvenance: PROVENANCE_0844, restartState: restartMarker("refresh", digest(overlayEntry())) };
+  writePatchedCatalog(inst);
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({}, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  const status = await call(handler(ctx, "/status"));
+  const r = status.body.refresh;
+  assert.equal(r.activated, true);
+  assert.equal(r.pendingRestart, false, "boot 已清 restartState");
+  assert.equal(r.phase, null);
+  assert.equal(r.lastError, null);
+  assert.equal(r.piAiVersion, "0.84.4");
+  assert.equal(r.catalogFile, inst.catalogFile);
+  const expectedDigest = createHash("sha256").update(readFileSync(inst.catalogFile)).digest("hex");
+  assert.equal(r.catalogDigest, expectedDigest, "catalogDigest 绑定实际加载副本（R4-5）");
 });

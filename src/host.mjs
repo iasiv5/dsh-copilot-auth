@@ -11,7 +11,7 @@ import { readJson, writeJsonAtomic, createMutex } from "./atomic-json.mjs";
 import { mergeCatalog, diffModels, digest, findPiAiInstallation } from "./catalog.mjs";
 import { fetchLatestCatalog } from "./catalog-fetch.mjs";
 import { fetchLiveAvailableModelIds } from "./copilot-models.mjs";
-import { loadState, saveState, createJournal, advanceJournal, restartMarker } from "./state.mjs";
+import { loadState, saveState, freshState, createJournal, advanceJournal, restartMarker, setLastError, clearLastError } from "./state.mjs";
 
 export const name = "copilot-auth";
 export const inject = ["webServer", "authorization", "credentials", "settings", "llm"];
@@ -220,16 +220,12 @@ async function resolveCatalogSource(opts, mode, fetchImpl) {
 // settings raw user 层完整配置视图（R3-2）：digest/baseline/CAS 的唯一取数面。
 // 缺席一律 null 占位（非 undefined），保证 journal JSON 持久化无损、boot 重载后
 // 与现算视图可逐字节比较；「未配置 vs 显式空」由 *Present 标志区分。
-function rawSettingsView(ctx) {
+function viewFromUserLayer(user) {
   let route = {};
-  try {
-    const d = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
-    const user = d?.user;
-    if (user && typeof user === "object" && !Array.isArray(user)) {
-      const r = user.providers?.["github-copilot"];
-      if (r && typeof r === "object" && !Array.isArray(r)) route = r;
-    }
-  } catch { /* settings 未注入/未注册/读取失败一律按空视图 */ }
+  if (user && typeof user === "object" && !Array.isArray(user)) {
+    const r = user.providers?.["github-copilot"];
+    if (r && typeof r === "object" && !Array.isArray(r)) route = r;
+  }
   const modelsPresent = route.models !== undefined && route.models !== null;
   const modelOverridesPresent = route.modelOverrides !== undefined && route.modelOverrides !== null;
   return {
@@ -238,6 +234,181 @@ function rawSettingsView(ctx) {
     modelOverridesPresent,
     modelOverrides: modelOverridesPresent ? route.modelOverrides : null,
   };
+}
+
+function rawSettingsView(ctx) {
+  try {
+    const d = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
+    return viewFromUserLayer(d?.user);
+  } catch { /* settings 未注入/未注册/读取失败一律按空视图 */ }
+  return viewFromUserLayer(undefined);
+}
+
+// 幂等判定：当前视图是否已等于 target 形状——models 恰好为 targetIds 的纯 {id}
+// 条目（无任何字段定制），且无有效 modelOverrides。
+function viewEqualsTarget(view, targetIds) {
+  if (!view.modelsPresent || !Array.isArray(view.models)) return false;
+  if (view.models.some((m) => !m || typeof m !== "object" || Array.isArray(m) || Object.keys(m).some((k) => k !== "id"))) {
+    return false;
+  }
+  const ids = view.models.map((m) => m.id);
+  if ([...ids].sort().join("\0") !== [...targetIds].sort().join("\0")) return false;
+  if (view.modelOverridesPresent && view.modelOverrides && Object.keys(view.modelOverrides).length > 0) return false;
+  return true;
+}
+
+function overlayEntryIds(overlay) {
+  return Object.values(overlay ?? {}).flatMap((s) => Object.keys(s ?? {}));
+}
+
+// 启动序列（严格按序 boot 0→1→2；整体 try/catch，失败只记 lastError +
+// logger.warn，绝不阻断挂载；所有写入幂等，崩溃现场下个 boot 安全重试）。
+async function bootRefresh(ctx, opts) {
+  const stateFile = opts.stateFile ?? defaultStateFile();
+  let state = loadState(stateFile);
+  try {
+    if (state.lastError === "state-corrupt") {
+      // 损坏已隔离：持久化安全态（/status 稳定可见、激活丢失→自愈停用，🟡-4）
+      saveState(stateFile, state);
+    }
+    if (!state.journal && !state.activated && !state.restartState) return; // R9：未激活不触碰
+    let install = null;
+    try {
+      install = resolveInstall(opts);
+    } catch {
+      install = null;
+    }
+    let bootPatched = false;
+    const readDiskCatalog = () => JSON.parse(readFileSync(install.catalogFile, "utf8"));
+    const diskIds = (disk) => new Set(Object.values(disk).flatMap((s) => Object.keys(s ?? {})));
+
+    // boot 0：journal=prepared 崩溃恢复（先于激活门，但先过兼容 gate，R3-1）
+    if (state.journal?.phase === "prepared") {
+      if (!install || install.version !== state.journal.appliedAgainstPiAiVersion) {
+        state = setLastError(state, `prepared-incompatible: journal against ${state.journal.appliedAgainstPiAiVersion}, current ${install?.version ?? "none"} — re-run refresh preview`);
+        saveState(stateFile, state); // 目录零写入、journal 保留
+        return;
+      }
+      const replay = mergeCatalog(readDiskCatalog(), state.journal.pendingOverlay);
+      if (replay.added.length > 0) {
+        writeJsonAtomic(install.catalogFile, replay.merged);
+        bootPatched = true;
+      }
+      state.appliedOverlay = mergeCatalog(state.appliedOverlay, state.journal.pendingOverlay).merged;
+      state.appliedProvenance = {
+        sourcePiAiVersion: state.journal.source?.piAiVersion ?? null,
+        integrity: state.journal.source?.integrity ?? null,
+        appliedAgainstPiAiVersion: state.journal.appliedAgainstPiAiVersion,
+        catalogSchemaVersion: 1,
+      };
+      state.activated = true;
+      state.restartState = restartMarker("refresh", digest(state.appliedOverlay));
+      state.journal = advanceJournal(state.journal);
+      state = clearLastError(state);
+      saveState(stateFile, state);
+    }
+
+    // boot 1：自愈（仅 activated，且当前 pi-ai 版本==基线才重放；跨版本见 gate）
+    if (state.activated) {
+      const baseline = state.appliedProvenance?.appliedAgainstPiAiVersion;
+      const overlayIds = overlayEntryIds(state.appliedOverlay);
+      if (overlayIds.length > 0 && baseline) {
+        if (!install) {
+          state = setLastError(state, "self-heal-incompatible: pi-ai installation not found");
+          saveState(stateFile, state);
+        } else if (install.version === baseline) {
+          const replay = mergeCatalog(readDiskCatalog(), state.appliedOverlay);
+          if (replay.added.length > 0) {
+            writeJsonAtomic(install.catalogFile, replay.merged); // 原子重放
+            bootPatched = true;
+            state.restartState = restartMarker("self-heal", digest(state.appliedOverlay));
+            state = clearLastError(state);
+            saveState(stateFile, state);
+          }
+        } else {
+          const missing = overlayIds.filter((id) => !diskIds(readDiskCatalog()).has(id));
+          if (missing.length > 0) {
+            // 跨版本有缺失：上报 self-heal-incompatible，不改安装树
+            state = setLastError(state, `self-heal-incompatible: pi-ai ${install.version} != baseline ${baseline}, missing ${missing.join(",")}`);
+            saveState(stateFile, state);
+          }
+          // 条目已原生存在 → 空操作
+        }
+      }
+    }
+
+    // boot 2：本 boot 未写目录时，两个独立出口（R3-5 职责分离）
+    if (!bootPatched) {
+      // 2a. journal=committed → settings 真 CAS（settings 同步的唯一触发源）
+      if (state.journal?.phase === "catalog-committed-needs-restart") {
+        const j = state.journal;
+        let consumed = false;
+        let failed = null;
+        try {
+          if (!install) throw new Error("pi-ai installation not found");
+          // 语义前置（Y2-3）：targetIds 全部可由当前目录解析；whole-file digest 仅诊断
+          const ids = diskIds(readDiskCatalog());
+          const unresolvable = j.targetIds.filter((id) => !ids.has(id));
+          if (unresolvable.length > 0) throw new Error(`target-unresolvable: ${unresolvable.join(",")}`);
+          const desc = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
+          if (!desc) throw new Error("settings namespace llm-pi-ai unavailable");
+          const view = viewFromUserLayer(desc.user);
+          if (digest(view) === digest(j.settingsBaseline)) {
+            await ctx.settings.mutate("llm-pi-ai", [
+              { op: "set", path: ["providers", "github-copilot", "models"], value: j.targetIds.map((id) => ({ id })) },
+              { op: "unset", path: ["providers", "github-copilot", "modelOverrides"] },
+            ], desc.revision); // 真 CAS：revision 不符由 settings 抛 SETTINGS_CONFLICT
+            consumed = true;
+          } else if (viewEqualsTarget(view, j.targetIds)) {
+            consumed = true; // 已等于 target → 幂等消费，不再 mutate
+          } else {
+            failed = "settings-conflict: configuration changed since preview; re-run refresh";
+          }
+        } catch (err) {
+          failed = err?.code === "SETTINGS_CONFLICT" || /conflict/i.test(String(err?.message ?? ""))
+            ? `settings-conflict: ${err.message}`
+            : String(err?.message ?? err);
+        }
+        if (consumed) {
+          state.journal = null;
+          state = clearLastError(state);
+          saveState(stateFile, state);
+        } else if (failed) {
+          state = setLastError(state, failed); // 不覆盖、记 conflict、/status 上报
+          saveState(stateFile, state);
+        }
+      }
+      // 2b. restartState 非空且 expected entries 已在目录 → 仅清 restartState
+      // （不携带 settings 意图：单独存在时不得触碰 describe/mutate）
+      if (state.restartState && install) {
+        const ids = diskIds(readDiskCatalog());
+        if (overlayEntryIds(state.appliedOverlay).every((id) => ids.has(id))) {
+          state.restartState = null;
+          state = clearLastError(state);
+          saveState(stateFile, state);
+        }
+      }
+    }
+  } catch (err) {
+    try {
+      saveState(stateFile, setLastError(state, err));
+    } catch { /* 记录失败不掩盖 */ }
+    ctx.logger?.warn?.("copilot-auth: refresh boot failed: %s", String(err?.message ?? err));
+  }
+}
+
+// /status 专用只读读取：不隔离、不写盘（隔离只在 boot 发生一次）
+function peekState(path) {
+  const corrupt = () => ({ ...freshState(), lastError: "state-corrupt" });
+  let raw;
+  try {
+    raw = readJson(path);
+  } catch {
+    return corrupt();
+  }
+  if (raw === undefined) return freshState();
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return corrupt();
+  return { ...freshState(), ...raw };
 }
 
 // preview 与 apply 共享的输入计算——digest 绑定的正确性依赖两侧走同一代码路径。
@@ -276,6 +447,14 @@ export function apply(ctx, opts = {}) {
   let attempt = emptyState();
   let lastSyncError;
   const refreshMutex = createMutex(); // 宿主单进程内互斥（不支持多实例，见 README）
+
+  // 启动序列：prepared 恢复（先过兼容 gate）→ 激活门 → 自愈 → settings 真 CAS。
+  // 绝不阻断挂载；失败仅 lastError + warn。opts.onBootDone 为测试钩子（boot  settle 回调）。
+  void bootRefresh(ctx, opts)
+    .catch((err) => {
+      ctx.logger?.warn?.("copilot-auth: refresh boot failed: %s", String(err?.message ?? err));
+    })
+    .finally(() => opts.onBootDone?.());
 
   // 模型目录同步只在登录成功后执行（2026-09-05 对齐结论：挂载不再同步）。
   // 插件启动/重启绝不触碰用户 settings，用户精简过的目录不会被动重置。
@@ -352,7 +531,35 @@ export function apply(ctx, opts = {}) {
       } catch {
         configured = false;
       }
-      json(res, 200, { configured, syncError: lastSyncError });
+      // refresh 状态块：lastError 直读状态文件顶层（R3-6）；pendingRestart 派生自
+      // 状态文件（journal 相位或 restartState），不用模块布尔；piAiVersion /
+      // catalogDigest / catalogFile 来自同根解析，digest 为当前文件字节 sha256
+      // （E2E 据此把被检查文件绑定到实际加载副本，R3-8/R4-5）。
+      let install = null;
+      try {
+        install = resolveInstall(opts);
+      } catch {
+        install = null;
+      }
+      let catalogDigest = null;
+      if (install) {
+        try {
+          catalogDigest = digest(readFileSync(install.catalogFile));
+        } catch {
+          catalogDigest = null;
+        }
+      }
+      const state = peekState(opts.stateFile ?? defaultStateFile());
+      const refresh = {
+        activated: state.activated === true,
+        pendingRestart: state.restartState != null || state.journal?.phase === "catalog-committed-needs-restart",
+        phase: state.journal?.phase ?? null,
+        lastError: state.lastError ?? null,
+        piAiVersion: install?.version ?? null,
+        catalogDigest,
+        catalogFile: install?.catalogFile ?? null,
+      };
+      json(res, 200, { configured, syncError: lastSyncError, refresh });
     },
   });
 
