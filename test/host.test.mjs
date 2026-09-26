@@ -47,13 +47,16 @@ function makeCtx(script = {}, opts = {}) {
                   const revision = ctx.script.revision ?? 1;
                   // 并发写注入钩子：describe 返回后、mutate 前让 revision 过期
                   if (ctx.script.bumpAfterDescribe) ctx.script.revision = revision + 1;
-                  return [{ ns: "llm-pi-ai", revision, user: ctx.script.userLayer }];
+                  const row = { ns: "llm-pi-ai", revision, user: ctx.script.userLayer };
+                  // 0.1.7+ describe 行带 value（base+user 合成）；仅脚本显式给值时模拟
+                  if (ctx.script.valueLayer !== undefined) row.value = ctx.script.valueLayer;
+                  return [row];
                 } },
     llm: { listModels: async () => ctx.script.served ?? [] },
-    script: { notices: [], record: {}, configured: undefined, userLayer: undefined, ...script },
+    script: { notices: [], record: {}, userLayer: undefined, valueLayer: undefined, ...script },
     opts,
   };
-  ctx.settings.get = () => ctx.script.configured;
+  // 0.1.7 起 settings.get 已移除，mock 不再提供 get：readConfiguredRoute 走 describe
   // 默认隔离：未显式注入 stateFile 时给临时文件，测试绝不触碰真实 ~/.dsh 状态
   let bootDone;
   ctx.bootReady = new Promise((r) => { bootDone = r; });
@@ -149,12 +152,12 @@ test("挂载不再同步模型目录——即使已登录也不触碰用户 sett
   assert.equal(ctx.settings.mutateCalls.length, 0);
 });
 
-test("登录时目录已存在（含空列表）则不写入——用户精简不被重置", async () => {
+test("登录时目录已存在（含空列表）则不写入——用户精简不被重置（describe user 层，0.1.5- 形态）", async () => {
   const custom = [{ id: "gpt-5.4" }, { id: "claude-opus-4.8" }, { id: "gemini-3.7-flash" }];
   for (const models of [custom, []]) {
     const ctx = makeCtx({
       record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } },
-      configured: { providers: { "github-copilot": { models } } },
+      userLayer: { providers: { "github-copilot": { models } } },
     });
     await call(handler(ctx, "/start"), { method: "POST" });
     await new Promise((r) => setTimeout(r, 10));
@@ -162,10 +165,20 @@ test("登录时目录已存在（含空列表）则不写入——用户精简�
   }
 });
 
+test("登录时目录已存在于 describe value 层则不写入（0.1.7+ 合成视图形态）", async () => {
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } },
+    valueLayer: { providers: { "github-copilot": { models: [{ id: "gpt-5.4" }] } } },
+  });
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctx.settings.mutateCalls.length, 0, "value 层已配置的目录应视作用户所有");
+});
+
 test("仅 modelOverrides 也算用户所有，登录不写入", async () => {
   const ctx = makeCtx({
     record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4"] } } },
-    configured: { providers: { "github-copilot": { modelOverrides: { "gpt-5.4": { displayName: "我的 GPT" } } } } },
+    userLayer: { providers: { "github-copilot": { modelOverrides: { "gpt-5.4": { displayName: "我的 GPT" } } } } },
   });
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));

@@ -5,10 +5,9 @@ import YAML from "yaml";
 
 const doc = YAML.parse(readFileSync(new URL("../cordis.patch.yml", import.meta.url), "utf8"));
 
-test("insert 挂载 dsh-authorization 服务（内置 bundle 未挂载的前置）", () => {
+test("insert 不再挂载 dsh-authorization（0.1.7 起 runtime 内置，重复 provide 即冲突）", () => {
   const insert = doc.find((row) => Array.isArray(row.insert))?.insert ?? [];
-  const auth = insert.find((e) => e.id === "copilot-authorization");
-  assert.equal(auth?.name, "@deepseek-ai/dsh-authorization");
+  assert.equal(insert.find((e) => e.id === "copilot-authorization"), undefined);
 });
 
 test("insert 本插件 host entry，name 与 package.json 一致", () => {

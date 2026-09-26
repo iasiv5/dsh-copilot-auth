@@ -63,11 +63,15 @@ function readCatalogModelIds() {
 // 里该路由的 models 列表后重新登录即可。
 
 // 读取解析后的 github-copilot 路由配置（base 层 + 用户层的最终值）。
+// 0.1.7 起 settings.get(ns) 被移除（settings API 重塑，见 know-how 013 §3），
+// 改经 describe()：value 层（base+user 合成）语义等价旧 get；旧版 DSH 的
+// describe 行无 value 时回退 user 层（用户定制目录恰在 user 层）。
 // settings 未注入 / 未注册 / 读取失败一律按空处理——回退到可写入分支，
 // 保持既有 turnkey 行为不变。
 function readConfiguredRoute(ctx) {
   try {
-    const section = ctx.settings?.get?.("llm-pi-ai");
+    const desc = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
+    const section = desc?.value ?? desc?.user;
     return section?.providers?.["github-copilot"] ?? {};
   } catch {
     return {};

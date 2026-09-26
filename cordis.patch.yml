@@ -1,11 +1,11 @@
-# 1) 前置：0.1.2-rc.1 的全部 6 个内置 bundle 均未挂载 authorization 服务；
-#    dsh-llm-pi-ai 的登录流注册是被动 ctx.inject（lib/index.js L2501），不挂此行则 flow 不存在。
+# 0.1.2-rc.1 时代内置 bundle 不挂 authorization 服务，需在此 insert
+# @deepseek-ai/dsh-authorization；0.1.7 起 runtime 已内置该服务，重复 provide
+# 报 `service "authorization" has been registered`（入口不激活，journal 噪声）。
+# v1.2.0 起仅适配 0.1.7+，不再 insert；旧版 DSH（≤0.1.5）请使用 1.1.x。
 - insert:
-    - id: copilot-authorization
-      name: '@deepseek-ai/dsh-authorization'
-    # 2) 本插件 host 半区（web 树有 webServer 服务才会激活）
-    #    路由前缀固定 /copilot-auth、不做配置项：client 侧 fetch 硬编码同一路径，
-    #    配置一旦漂移 client 即 404（见附录 B）
+    # 本插件 host 半区（web 树有 webServer 服务才会激活）
+    # 路由前缀固定 /copilot-auth、不做配置项：client 侧 fetch 硬编码同一路径，
+    # 配置一旦漂移 client 即 404（见附录 B）
     - id: copilot-auth
       name: '@inventec/dsh-copilot-auth'
 # 3) 预置 GitHub Copilot 路由：entry config 作为 settings base 层，

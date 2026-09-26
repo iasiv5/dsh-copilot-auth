@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/%40inventec%2Fdsh-copilot-auth?label=npm)](https://www.npmjs.com/package/@inventec/dsh-copilot-auth)
 [![CI](https://img.shields.io/github/actions/workflow/status/iasiv5/dsh-copilot-auth/ci.yml?branch=main&label=CI)](https://github.com/iasiv5/dsh-copilot-auth/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/iasiv5/dsh-copilot-auth?label=License)](https://github.com/iasiv5/dsh-copilot-auth/blob/main/LICENSE)
-[![DSH Web](https://img.shields.io/badge/DSH%20Web-0.1.2--rc.1%20verified-2563eb)](#前置要求)
+[![DSH Web](https://img.shields.io/badge/DSH%20Web-0.1.7--rc.2%20verified-2563eb)](#前置要求)
 
 为 DSH（DeepSeek Harness）内置的 GitHub Copilot LLM provider 补上 Web 端设备码（device flow）登录/注销入口，并预置一条开箱即用的 GitHub Copilot 提供方路由。
 
@@ -12,7 +12,7 @@
 
 用公司分配的 GitHub 账号（带 Copilot 订阅）登录 DSH 的方式，和其他 Copilot 客户端一致：**网页 + 设备码**，全程不填 API Token。
 
-本插件**复用 DSH 内置通道**（pi-ai 的 github-copilot provider），不实现任何 GitHub 协议代码——token 自动轮换、模型发现、协议适配全部由内置实现负责。插件本身只做三件事：挂载 DSH 内置但默认未启用的授权服务、提供「登录/注销」设置页、预置 `GitHub Copilot` 路由。
+本插件**复用 DSH 内置通道**（pi-ai 的 github-copilot provider），不实现任何 GitHub 协议代码——token 自动轮换、模型发现、协议适配全部由内置实现负责。插件本身只做三件事：提供「登录/注销」设置页、预置 `GitHub Copilot` 路由、模型目录兜底/刷新（授权服务 0.1.7+ 由 runtime 内置；≤0.1.5 时代由本插件补丁挂载，该版本线见 v1.1.x）。
 
 ## 特性
 
@@ -22,11 +22,13 @@
 - 🔄 **手动补充新模型目录条目**：GHC 设置页一键刷新——diff 预览 + 二次确认 + 数据级目录补丁（**pi-ai 版本不动**），新模型（如 gemini-3.8-flash）即可加入、失效模型镜像移除
 - 🌐 **中/英双语界面**：跟随 DSH 语言设置自动切换
 - 🔑 **凭据安全托管**：存入 DSH 内置凭据库（文件强制 0600 权限），Copilot 临时 token 到期自动刷新
-- 🧪 **测试与 CI**：105 条单元测试；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
+- 🧪 **测试与 CI**：106 条单元测试；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
 
 ## 前置要求
 
-- DSH `0.1.2-rc.1`（实测版本）
+- DSH `0.1.7-rc.2`（实测版本，v1.2.0 起的适配目标）
+  - 版本矩阵：`0.1.2-rc.1` ～ `0.1.5-rc.2` 请用 **v1.1.x**（v1.2.0 移除了旧版必需的 authorization 挂载补丁，在旧版上无法激活）
+  - v1.2.0 适配了 0.1.7 的 settings API 重塑（`settings.get` 移除），目录保护逻辑改走 `describe()`，对旧版 API 向后兼容
 - 有效的 GitHub Copilot 订阅（公司分配的 github.com 组织账号，SSO 登录）
 - `pnpm` 可用（`dsh plugin` 是 pnpm 转发器）
 
@@ -113,7 +115,7 @@ npm pack --dry-run
 - 自行在 `cordis.patch.yml` patch `llm-pi-ai` 整段 config 会覆盖预置路由
 - `settings.yaml` 的 `llm-pi-ai:` 节只能稀疏覆盖字段，无法删除预置路由本身（移除须卸载本插件）
 - 路由前缀 `/copilot-auth` 两侧硬编码，不可配置
-- DSH rc 版本耦合：实测 `0.1.2-rc.1`，peer 仅 `@deepseek-ai/cordis@^4.0.2`
+- DSH rc 版本耦合：实测 `0.1.7-rc.2`（v1.2.0；`0.1.2-rc.1` 由 v1.1.x 实测），peer 仅 `@deepseek-ai/cordis@^4.0.2`
 - 模型目录只在「尚不存在」时由登录成功兜底填充一次，填充后归用户所有：账号新增的模型不会自动出现——用 GHC 设置页的「**刷新可用模型目录**」同步（见上节），或在 Models 页手动添加
 - 模型目录只写入 pi-ai 内置目录已描述的模型：目录快照外的新模型需先经「刷新可用模型目录」补入目录条目（数据级补丁，pi-ai 版本不变）才会出现在可选列表
 - DSH 升级后自愈仅在 pi-ai 基线版本不变（0.84.4）时重放；跨版本且条目未原生存在时上报 `self-heal-incompatible`，不修改安装树（重新执行一次手动刷新即可在新基线上激活）
