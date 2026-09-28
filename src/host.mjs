@@ -99,9 +99,13 @@ async function syncAvailableModels(ctx) {
     ids = available.filter((id) => served.has(id));
   }
   if (ids.length === 0) return;
+  // 真 CAS（与 boot 2a 同款，2026-09-28 审计补充）：携带 expectedRevision 提交，
+  // 与用户在 Models 页的并发编辑互斥——冲突时 settings 抛 SETTINGS_CONFLICT，
+  // 由 sync() 的 catch 记入 syncError（失败不静默），不再有静默覆盖窗口。
+  const desc = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
   await ctx.settings.mutate("llm-pi-ai", [
     { op: "set", path: ["providers", "github-copilot", "models"], value: ids.map((id) => ({ id })) },
-  ]);
+  ], desc?.revision);
 }
 
 function sameOrigin(req) {
@@ -573,8 +577,14 @@ export function apply(ctx, opts = {}) {
     handler: async (req, res) => {
       if (!guard(req, res, "POST")) return;
       // 幂等契约：deleteRecord 对不存在记录是 no-op 且正常 resolve，
-      // 真实删除与否由随后的 /status 反映。
-      await ctx.credentials.deleteRecord(CREDENTIAL_KEY);
+      // 真实删除与否由随后的 /status 反映。异常兜底与其余路由对齐
+      // （2026-09-28 审计：无 try/catch 的 reject 会造成连接悬挂/未处理拒绝）。
+      try {
+        await ctx.credentials.deleteRecord(CREDENTIAL_KEY);
+      } catch (err) {
+        json(res, 500, { ok: false, error: String(err?.message ?? err) });
+        return;
+      }
       json(res, 200, { ok: true });
     },
   });
