@@ -28,7 +28,13 @@
 
 - DSH `0.1.7-rc.2`（实测版本，v1.2.0 起的适配目标）
   - 版本矩阵：`0.1.2-rc.1` ～ `0.1.5-rc.2` 请用 **v1.1.x**（v1.2.0 移除了旧版必需的 authorization 挂载补丁，在旧版上无法激活）
-  - v1.2.0 适配了 0.1.7 的 settings API 重塑（`settings.get` 移除），目录保护逻辑改走 `describe()`，对旧版 API 向后兼容
+  - v1.2.0 适配了 0.1.7 的 settings API 重塑（`settings.get` 移除），目录保护逻辑改走 `describe()`：**`describe()` 读取在 value 层缺失时回退 user 层，兼容旧版 describe 行形状**；DSH 版本支持矩阵见下表
+
+| 本插件 | DSH 实测版本 | authorization 服务 | 说明 |
+|---|---|---|---|
+| v1.2.x | `0.1.7-rc.2`+ | runtime 内置，插件不挂载 | 适配 settings API 重塑后的 describe() 行形状 |
+| v1.1.x | `0.1.2-rc.1` ～ `0.1.5-rc.2` | 由 cordis.patch.yml insert 挂载 | v1.2.0 起移除该补丁，旧版 DSH 上无法激活 |
+
 - 有效的 GitHub Copilot 订阅（公司分配的 github.com 组织账号，SSO 登录）
 - `pnpm` 可用（`dsh plugin` 是 pnpm 转发器）
 
@@ -78,10 +84,10 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 
 ## 工作原理
 
-- 通过 `cordis.patch.yml` 三段生效：
-  1. 挂载 `@deepseek-ai/dsh-authorization` 服务（DSH 内置 bundle 未挂载，不挂则内置登录流不存在）
-  2. 注册本插件（host 侧在 webserver 上开 6 条本地路由：`/copilot-auth/start|state|status|logout|refresh/preview|refresh/apply`，跨站 Origin 拒绝）
-  3. 以 settings base 层预置 `github-copilot` 路由（用户 `settings.yaml` 可逐字段覆盖）
+- 通过 `cordis.patch.yml` 两段生效：
+  1. 挂载本插件 entry（host 侧在 webserver 上开 6 条本地路由：`/copilot-auth/start|state|status|logout|refresh/preview|refresh/apply`，跨站 Origin 拒绝）
+  2. 以 settings base 层预置 `github-copilot` 路由（用户 `settings.yaml` 可逐字段覆盖）
+- authorization 服务 **0.1.7+ 由 runtime 内置，无需也不得再挂载**（旧版 ≤0.1.5 请用 1.1.x，其依赖该 insert）
 - 登录走 GitHub 设备码流；凭据存 `~/.dsh/.credentials.yaml`（强制 600 权限）的 `llm-pi-ai/github-copilot` 记录，Copilot 临时 token 到期自动刷新
 - **模型目录兜底填充**：登录成功时，取「账号可用模型 ∩ pi-ai 内置目录」写入该路由的模型目录——仅当该路由尚未配置 `models` 且无 `modelOverrides` 时写入；目录已存在（含空列表）一律让路，插件启动/重启也绝不触碰用户 settings。同步失败经 `/copilot-auth/status` 的 `syncError` 字段暴露
 
@@ -89,14 +95,14 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 
 ```bash
 npm install
-npm test        # node:test：patch 结构 + host/目录/状态机/启动序列共 105 条
+npm test        # node:test：patch 结构 + host/目录/状态机/启动序列共 106 条
 npm run build   # esbuild 打包 client 到 lib/client.js（__ModuleLoader__ 信封）
 npm pack --dry-run
 ```
 
 | 路径 | 职责 |
 |---|---|
-| `cordis.patch.yml` | 三段 patch（authorization 挂载 / 本插件 entry / 预置路由） |
+| `cordis.patch.yml` | 两段 patch（本插件 entry / 预置路由；authorization 服务 0.1.7+ 由 runtime 内置，不再挂载） |
 | `src/host.mjs` · `src/shared.mjs` | host 半区：登录状态机、6 条本地路由、模型目录同步、刷新 preview/apply 与启动序列 |
 | `src/client.jsx` | client 半区：settings.section 插槽 + 设备码交互 + 双语文案 |
 | `scripts/build-client.mjs` | client 打包（`__ModuleLoader__` CJS 工厂信封） |
