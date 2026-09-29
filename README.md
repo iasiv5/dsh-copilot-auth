@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/%40inventec%2Fdsh-copilot-auth?label=npm)](https://www.npmjs.com/package/@inventec/dsh-copilot-auth)
 [![CI](https://img.shields.io/github/actions/workflow/status/iasiv5/dsh-copilot-auth/ci.yml?branch=main&label=CI)](https://github.com/iasiv5/dsh-copilot-auth/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/iasiv5/dsh-copilot-auth?label=License)](https://github.com/iasiv5/dsh-copilot-auth/blob/main/LICENSE)
-[![DSH Web](https://img.shields.io/badge/DSH%20Web-0.1.7--rc.2%20verified-2563eb)](#前置要求)
+[![DSH Web](https://img.shields.io/badge/DSH%20Web-0.1.7--rc.2%20%2F%200.2.0--rc.1%20verified-2563eb)](#前置要求)
 
 为 DSH（DeepSeek Harness）内置的 GitHub Copilot LLM provider 补上 Web 端设备码（device flow）登录/注销入口，并预置一条开箱即用的 GitHub Copilot 提供方路由。
 
@@ -26,13 +26,13 @@
 
 ## 前置要求
 
-- DSH `0.1.7-rc.2`（实测版本，v1.2.0 起的适配目标）
+- DSH `0.1.7-rc.2` / `0.2.0-rc.1`（实测版本，v1.2.x 的适配目标；0.2.0 起注意插件 peer 精确版本守卫，见下文版本矩阵）
   - 版本矩阵：`0.1.2-rc.1` ～ `0.1.5-rc.2` 请用 **v1.1.x**（v1.2.0 移除了旧版必需的 authorization 挂载补丁，在旧版上无法激活）
   - v1.2.0 适配了 0.1.7 的 settings API 重塑（`settings.get` 移除），目录保护逻辑改走 `describe()`：**`describe()` 读取在 value 层缺失时回退 user 层，兼容旧版 describe 行形状**；DSH 版本支持矩阵见下表
 
 | 本插件 | DSH 实测版本 | authorization 服务 | 说明 |
 |---|---|---|---|
-| v1.2.x | `0.1.7-rc.2`+ | runtime 内置，插件不挂载 | 适配 settings API 重塑后的 describe() 行形状 |
+| v1.2.x | `0.1.7-rc.2`+（`0.2.0-rc.1` 已实测通过） | runtime 内置，插件不挂载 | 适配 settings API 重塑后的 describe() 行形状 |
 | v1.1.x | `0.1.2-rc.1` ～ `0.1.5-rc.2` | 由 cordis.patch.yml insert 挂载 | v1.2.0 起移除该补丁，旧版 DSH 上无法激活 |
 
 - 有效的 GitHub Copilot 订阅（公司分配的 github.com 组织账号，SSO 登录）
@@ -121,7 +121,7 @@ npm pack --dry-run
 - 自行在 `cordis.patch.yml` patch `llm-pi-ai` 整段 config 会覆盖预置路由
 - `settings.yaml` 的 `llm-pi-ai:` 节只能稀疏覆盖字段，无法删除预置路由本身（移除须卸载本插件）
 - 路由前缀 `/copilot-auth` 两侧硬编码，不可配置
-- DSH rc 版本耦合：实测 `0.1.7-rc.2`（v1.2.0；`0.1.2-rc.1` 由 v1.1.x 实测），peer 仅 `@deepseek-ai/cordis@^4.0.2`
+- DSH rc 版本耦合：实测 `0.1.7-rc.2` 与 `0.2.0-rc.1`（v1.2.x；`0.1.2-rc.1` 由 v1.1.x 实测），peer 仅 `@deepseek-ai/cordis@^4.0.2`
 - 模型目录只在「尚不存在」时由登录成功兜底填充一次，填充后归用户所有：账号新增的模型不会自动出现——用 GHC 设置页的「**刷新可用模型目录**」同步（见上节），或在 Models 页手动添加
 - 模型目录只写入 pi-ai 内置目录已描述的模型：目录快照外的新模型需先经「刷新可用模型目录」补入目录条目（数据级补丁，pi-ai 版本不变）才会出现在可选列表
 - DSH 升级后自愈仅在 pi-ai 基线版本不变（0.84.4）时重放；跨版本且条目未原生存在时上报 `self-heal-incompatible`，不修改安装树（重新执行一次手动刷新即可在新基线上激活）
