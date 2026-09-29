@@ -1,6 +1,6 @@
 // atomic-json.mjs — 所有 JSON 写盘的唯一通道。
 // writeJsonAtomic: 同目录 temp（wx 排他创建）→ writeAll → fsyncFile → 重读 parse 校验
-// → rename → fsyncDirectory（仅此处失败降级 warn）。rename 前任何失败清理 temp 并抛错，
+// → rename → fsyncDirectory（win32 无目录 fsync 语义直接跳过，issue #1；其余失败仅此处降级 warn）。rename 前任何失败清理 temp 并抛错，
 // 原文件不动。第三参为语义 adapter 的部分覆盖（未覆盖键回落默认实现），供故障注入测试。
 import { randomUUID } from "node:crypto";
 import {
@@ -31,20 +31,27 @@ export function writeAll(fd, buffer, writeChunk = writeSync) {
   }
 }
 
+// 目录 fsync 是 POSIX 惯用法（open 目录句柄 + fsync，保目录项落盘）。
+// Windows 无目录 fsync 语义：对目录句柄 fsyncSync 必然 EPERM（libuv FlushFileBuffers
+// 对目录句柄拒绝，issue #1）——win32 直接跳过，NTFS 元数据日志已保证 rename 后
+// 的目录项一致性；POSIX 平台行为不变。具名导出仅供测试观察平台分支。
+export function fsyncDirectory(dir) {
+  if (process.platform === "win32") return;
+  const fd = openSync(dir, "r");
+  try {
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 const defaultFs = {
   openTemp: (path) => openSync(path, "wx"),
   writeAll: (fd, buf) => writeAll(fd, buf),
   fsyncFile: (fd) => fsyncSync(fd),
   closeFd: (fd) => closeSync(fd),
   rename: (from, to) => renameSync(from, to),
-  fsyncDirectory: (dir) => {
-    const fd = openSync(dir, "r");
-    try {
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-  },
+  fsyncDirectory,
   remove: (path) => unlinkSync(path),
 };
 

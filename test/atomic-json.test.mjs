@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readJson, writeJsonAtomic, writeAll, createMutex } from "../src/atomic-json.mjs";
+import { readJson, writeJsonAtomic, writeAll, createMutex, fsyncDirectory } from "../src/atomic-json.mjs";
 
 test("readJson：缺失→undefined；坏 JSON→抛错", () => {
   const dir = mkdtempSync(join(tmpdir(), "aj-"));
@@ -47,6 +47,32 @@ test("writeAll：短写循环补写 + 零进度防死循环（R4-2，方案 A：
   writeAll(1, buf, (fd, b, off, len) => { calls++; return Math.ceil(len / 2); }); // 每次只写一半
   assert.ok(calls >= 2, "短写被循环补写");
   assert.throws(() => writeAll(1, buf, () => 0), /no progress/, "writeChunk 返回 0 必须抛错防死循环");
+});
+
+test("fsyncDirectory：win32 无目录 fsync 语义，直接跳过（issue #1）", () => {
+  const realPlatform = process.platform;
+  // POSIX 基线：真实实现确实打开并 fsync 目录——成功路径不抛；不存在路径抛 ENOENT 证明非空操作
+  fsyncDirectory(mkdtempSync(join(tmpdir(), "aj-")));
+  const bogus = join(tmpdir(), "fsyncdir-not-exist");
+  assert.throws(() => fsyncDirectory(bogus), (err) => err.code === "ENOENT");
+  // mock win32：跳过后未触碰 fs（不存在路径也不抛），端到端落盘无告警
+  Object.defineProperty(process, "platform", { value: "win32" });
+  try {
+    assert.equal(fsyncDirectory(bogus), undefined);
+    const dir = mkdtempSync(join(tmpdir(), "aj-win-"));
+    const warnings = [];
+    const origWarn = console.warn;
+    console.warn = (msg) => warnings.push(msg);
+    try {
+      writeJsonAtomic(join(dir, "w.json"), { ok: 1 });
+    } finally {
+      console.warn = origWarn;
+    }
+    assert.deepEqual(readJson(join(dir, "w.json")), { ok: 1 });
+    assert.deepEqual(warnings, [], "win32 跳过目录 fsync 后不应产生告警");
+  } finally {
+    Object.defineProperty(process, "platform", { value: realPlatform });
+  }
 });
 
 test("mutex：并发串行，且回调拒绝后不中毒（Y2-4）", async () => {

@@ -22,7 +22,7 @@
 - 🔄 **手动补充新模型目录条目**：GHC 设置页一键刷新——diff 预览 + 二次确认 + 数据级目录补丁（**pi-ai 版本不动**），新模型（如 gemini-3.8-flash）即可加入、失效模型镜像移除
 - 🌐 **中/英双语界面**：跟随 DSH 语言设置自动切换
 - 🔑 **凭据安全托管**：存入 DSH 内置凭据库（文件强制 0600 权限），Copilot 临时 token 到期自动刷新
-- 🧪 **测试与 CI**：106 条单元测试；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
+- 🧪 **测试与 CI**：107 条单元测试；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
 
 ## 前置要求
 
@@ -95,7 +95,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 
 ```bash
 npm install
-npm test        # node:test：patch 结构 + host/目录/状态机/启动序列共 106 条
+npm test        # node:test：patch 结构 + host/目录/状态机/启动序列共 107 条
 npm run build   # esbuild 打包 client 到 lib/client.js（__ModuleLoader__ 信封）
 npm pack --dry-run
 ```
@@ -126,6 +126,7 @@ npm pack --dry-run
 - 模型目录只写入 pi-ai 内置目录已描述的模型：目录快照外的新模型需先经「刷新可用模型目录」补入目录条目（数据级补丁，pi-ai 版本不变）才会出现在可选列表
 - DSH 升级后自愈仅在 pi-ai 基线版本不变（0.84.4）时重放；跨版本且条目未原生存在时上报 `self-heal-incompatible`，不修改安装树（重新执行一次手动刷新即可在新基线上激活）
 - 并发保护为宿主单进程内 mutex，**不支持多实例/多进程并发刷新**
+- 状态落盘后的目录 fsync 仅在 POSIX 执行：Windows 无目录 fsync 语义（对目录句柄 fsync 必然 `EPERM`），win32 直接跳过、不再刷告警，目录项一致性由 NTFS 元数据日志保证（v1.2.3 起，issue #1）；POSIX 行为不变
 
 ## 维护者发布
 
