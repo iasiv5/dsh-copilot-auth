@@ -1,7 +1,7 @@
 // host 半区：cordis 插件。注册 6 条 exact 路由，把内置 github-copilot 的
 // OAuth 设备码流（ctx.authorization）暴露给 Web client，并提供「手动刷新可用
 // 模型目录」（数据级目录补丁，pi-ai 代码版本不动；只读 GET /models 适配显式
-// 耦合 pi-ai 0.84.4，详见 CONTEXT.md 与 ADR 0001）。
+// 耦合 pi-ai 0.84.4，详见 GLOSSARY.md 与 ADR 0001）。
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";

@@ -1,4 +1,4 @@
-# CONTEXT.md — dsh-copilot-auth 领域词汇表
+# GLOSSARY.md — dsh-copilot-auth 领域词汇表
 
 ## 模型列表的三个层次（勿混用）
 

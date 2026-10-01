@@ -62,7 +62,7 @@ boot（插件 apply() 启动，严格按序）：
 
 ## 输入工件
 
-- `CONTEXT.md`、`docs/adr/0001-data-level-catalog-patch.md`（均已按评审修订）
+- `GLOSSARY.md`、`docs/adr/0001-data-level-catalog-patch.md`（均已按评审修订）
 - pi-ai 0.84.4 事实锚点（已复核）：
   - 凭证：`payload.access`（非 `access_token`）、`payload.enterpriseUrl`、`payload.availableModelIds`
   - baseUrl：`dist/auth/oauth/github-copilot.js` 的 `getGitHubCopilotBaseUrl()`——token `proxy-ep=proxy.<host>` → `https://api.<host>`；enterprise → `https://copilot-api.<domain>`；缺省 `https://api.individual.githubcopilot.com`
@@ -92,18 +92,18 @@ boot（插件 apply() 启动，严格按序）：
 ### Task 1: 文档修订定稿
 
 - 目标：CONTEXT/ADR 反映评审结论（本轮已改好，此任务做终稿核对）
-- 涉及文件：Modify `CONTEXT.md`、`docs/adr/0001-data-level-catalog-patch.md`
+- 涉及文件：Modify `GLOSSARY.md`、`docs/adr/0001-data-level-catalog-patch.md`
 - 接口契约：Consumes 无；Produces 全局约束文本（供 Task 11 README 对齐措辞）
 - 验证范围：grep 核对关键表述
 
 - [ ] Step 1: 核对 CONTEXT 含「激活边界」「只增不更新」「显式耦合」「收窄」（grep -c 数的是匹配行数而非关键词数，必须逐词 grep -q）
-- Run: `cd /home/ubuntu/workspace/dsh-copilot-auth && for w in 激活边界 只增不更新 显式耦合 收窄; do grep -q "$w" CONTEXT.md || { echo "missing: $w"; exit 1; }; done`
+- Run: `cd /home/ubuntu/workspace/dsh-copilot-auth && for w in 激活边界 只增不更新 显式耦合 收窄; do grep -q "$w" GLOSSARY.md || { echo "missing: $w"; exit 1; }; done`
 - Expected: 退出码 0
 - [ ] Step 2: 核对 ADR Consequences 含同 boot 禁令、digest 绑定、激活边界（本轮还需把「单进程单实例」限制补入 ADR——Task 11 同步执行）
 - Run: `cd /home/ubuntu/workspace/dsh-copilot-auth && for w in 同一 boot digest 激活; do grep -q "$w" docs/adr/0001-data-level-catalog-patch.md || { echo "missing: $w"; exit 1; }; done`
 - Expected: 退出码 0
 - [ ] Step 3: checkpoint commit
-- Run: `git add CONTEXT.md docs/ && git commit -m "docs: adr+context revised per review (activation gate, additive-only, journal)"`
+- Run: `git add GLOSSARY.md docs/ && git commit -m "docs: adr+context revised per review (activation gate, additive-only, journal)"`
 - Expected: commit 成功
 
 ### Task 2: src/atomic-json.mjs 原子存储
