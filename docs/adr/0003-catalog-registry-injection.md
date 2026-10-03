@@ -93,6 +93,32 @@ ADR 0001 的数据级目录补丁要求把合并后的目录写回 pi-ai 的
   host 测试覆盖 apply 成功、注入失败、自证失败回滚、boot0/boot1 注入落地、
   可写树不咨询注册表面。CI 三平台矩阵（ubuntu/windows/macos）照旧。
 
+## 增补（v1.2.6）——注入与宿主快照的时序竞态
+
+**现场缺陷**（2026-10-03 desktop 实测，v1.2.5）：重启后注入的模型从 picker 消失，而
+settings 里还在。
+
+**根因**：`dsh-llm-pi-ai` 在**挂载时**就构建快照，并把目录解析结果按 settings 配置对象
+的身份 memoize（`profiles()` 只在 `config.providers.get()` 变身份时重建）；插件挂载晚于
+它，动态 import pi-ai 模块图又要数秒——boot1 自愈的注入因此落在快照之后：注册表里有条目，
+路由仍按旧快照把该模型判为"目录不描述"并丢弃（per-model error）。点「确认刷新」之所以
+当场生效，只是因为 apply 顺带写了 settings，恰好触发了快照重建；重启时没有这个触发条件。
+
+**修法**：
+
+1. **注入后用宿主自己的 `listModels` 复核**（而不是用我们自己 import 的模块实例自证——
+   那是自指的，永远为真）。缺失即判定"注入未被快照采纳"。
+2. **同值触碰**：把该路由 `models` 的**当前原值**原样写回一次（`settings.mutate` + CAS），
+   只改配置对象身份、绝不改用户内容，借此触发宿主重建快照；随后短重试复核。
+3. **只对"被 settings 引用的注入条目"动手**：用户没引用的条目不触碰 settings——启动期
+   不写用户配置的原则不破。
+4. **失败可观测**：仍端不出来时记可 grep 的 `lastError: registry-not-served: <ids> …`；
+   `/status` 新增 `settingsNotServed`（宿主 API 不可用时为 `null`），这是"注册表里有、
+   路由端不出"的唯一直接证据。
+
+**代价与边界**：该触碰是一次真实 settings 写入（同值），在启动期与用户并发编辑相撞时
+可能 `SETTINGS_CONFLICT`——此时只记日志、下个 boot 重试，不阻断挂载。
+
 ## 实测记录（2026-10-03，Windows 桌面机 / dsh-desktop 0.2.0-rc.2 / pi-ai 0.87.1）
 
 - 探针 A（Electron-as-node，Electron 44.0.0 / node 24.18.1）：asar 内 `fs` 读通过、
@@ -115,3 +141,8 @@ ADR 0001 的数据级目录补丁要求把合并后的目录写回 pi-ai 的
   （打包目录 0.87.1 根本不存在该 id，任何回退路径都不可能产生这个数值），计费记于
   `github-copilot/gpt-6.1-sol`（1 次请求 / 12924 tokens）⇒ 注入条目确实被宿主路由
   加载并完成了真实推理调用，而官方安装树**一字未改**。
+- **重启回归（v1.2.5 的缺陷现场）**：17:12:27 重启后再开新会话，模型列表里已无
+  `gpt-6.1-sol`（新会话落到 `gemini-3.8-flash`），而 settings 仍含该 id、`/status.lastError`
+  为 null、`registryInjected` 仍为 2——正是"注入自证通过、宿主快照未采纳"的形态。
+  v1.2.6 的「宿主 API 复核 × 同值触碰」修复把该场景纳入 boot1 自愈：重启后 `lastError`
+  为空且 `/status.settingsNotServed` 为空数组即为通过证据。

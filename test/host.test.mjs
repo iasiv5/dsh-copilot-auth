@@ -982,3 +982,70 @@ test("ADR 0003：登录同步把注册表里的条目也算作可解析（目录
   assert.deepEqual(ctx.settings.mutateCalls[0].ops[0].value, [{ id: "gpt-a" }, { id: "gpt-reg" }],
     "可解析集合 = 目录文件 ∪ 进程内注册表；两者都没有的 gpt-nope 仍被排除");
 });
+
+// ==================== 注入后复核与同值触碰自愈（ADR 0003 增补：宿主快照时序竞态） ====================
+// 现场形态（2026-10-03 desktop 实测）：llm-pi-ai 在挂载时即把目录解析结果定稿并 memoize，
+// 插件的 boot1 注入要晚好几秒 —— 于是注册表里有条目、路由仍按旧快照丢弃它（settings 里
+// 还在，picker 里看不到）。修法：注入后用宿主自己的 listModels 复核，缺失即同值触碰。
+
+const servedRef = (ctx, ids = []) => {
+  ctx.script.served = ids.map((id) => ({ id }));
+  return ctx.script.served;
+};
+
+test("ADR 0003 增补：boot1 注入落在宿主快照之后 → 同值触碰触发重建，模型端出来且无 lastError", async () => {
+  const inst = makeAsarInstall();
+  const state = {
+    ...freshState(), activated: true, appliedOverlay: overlayEntry(),
+    appliedProvenance: { ...PROVENANCE_0844, appliedAgainstPiAiVersion: "0.87.1" },
+  };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({
+    userLayer: { providers: { "github-copilot": { models: [{ id: "gpt-b" }] } } },
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  const served = servedRef(ctx, []); // 初始：路由端不出任何东西（旧快照形态）
+  const baseMutate = ctx.settings.mutate;
+  ctx.settings.mutate = async (...args) => {
+    const r = await baseMutate(...args);
+    served.push({ id: "gpt-b" }); // 触碰 → 快照重建 → 模型可见
+    return r;
+  };
+  await ctx.bootReady;
+  const touch = ctx.settings.mutateCalls.at(-1);
+  assert.deepEqual(touch.ops, [{ op: "set", path: ["providers", "github-copilot", "models"], value: [{ id: "gpt-b" }] }],
+    "同值触碰：写回与当前完全相同的 models 值（绝不改用户内容）");
+  assert.equal(loadStateFile(inst.stateFile).lastError, null, "自愈成功，无 lastError");
+});
+
+test("ADR 0003 增补：触碰后仍端不出来 → lastError 记 registry-not-served（可 grep），/status 报 settingsNotServed", async () => {
+  const inst = makeAsarInstall();
+  const state = {
+    ...freshState(), activated: true, appliedOverlay: overlayEntry(),
+    appliedProvenance: { ...PROVENANCE_0844, appliedAgainstPiAiVersion: "0.87.1" },
+  };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({
+    userLayer: { providers: { "github-copilot": { models: [{ id: "gpt-b" }] } } },
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  servedRef(ctx, []); // 触碰也不改变：永远端不出来
+  await ctx.bootReady;
+  assert.match(loadStateFile(inst.stateFile).lastError, /registry-not-served: gpt-b/);
+  const status = await call(handler(ctx, "/status"));
+  assert.deepEqual(status.body.refresh.settingsNotServed, ["gpt-b"], "诊断口径直接给出「注册表里有、路由不端」的 id");
+});
+
+test("ADR 0003 增补：settings 未引用该条目 → 不做触碰（启动期不碰用户 settings）", async () => {
+  const inst = makeAsarInstall();
+  const state = {
+    ...freshState(), activated: true, appliedOverlay: overlayEntry(),
+    appliedProvenance: { ...PROVENANCE_0844, appliedAgainstPiAiVersion: "0.87.1" },
+  };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({
+    userLayer: { providers: { "github-copilot": { models: [{ id: "gpt-a" }] } } }, // 不含被注入的 gpt-b
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  servedRef(ctx, []);
+  await ctx.bootReady;
+  assert.equal(ctx.settings.mutateCalls.length, 0, "用户没引用 → 启动期零 settings 写入");
+  assert.equal(loadStateFile(inst.stateFile).lastError, null);
+});

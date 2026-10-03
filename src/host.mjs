@@ -309,6 +309,80 @@ function overlayEntryIds(overlay) {
   return Object.values(overlay ?? {}).flatMap((s) => Object.keys(s ?? {}));
 }
 
+// ==================== 注入后的"路由是否真的端出来"复核（ADR 0003 增补） ====================
+// 为什么需要这一层：llm-pi-ai 在**挂载时**就构建快照，并把目录解析结果按 settings 配置
+// 对象的身份 memoize（其 profiles() 只在 config.providers.get() 变身份时重建）。插件挂载
+// 晚于它，动态 import pi-ai 模块图又要几秒——boot 期注入因此常常落在快照之后：注册表里
+// 有条目，路由仍按旧快照把它判为"目录不描述"并丢弃。注入成功后必须用**宿主自己的**
+// listModels 复核（不能用我们自己的模块实例自证，那是自指的），缺失就做一次
+// **同值 settings 触碰**触发快照重建——只改配置对象身份，绝不改用户内容。
+
+// 路由当前端出的模型 id 集合；宿主 API 不可用时返回 null（无从判断，不误报）。
+async function servedModelIds(ctx) {
+  try {
+    return new Set((await ctx.llm.listModels("github-copilot")).map((m) => m?.id).filter(Boolean));
+  } catch {
+    return null;
+  }
+}
+
+// 用户 settings 里当前引用的模型 id（只有它们才需要"端得出来"）。
+function configuredModelIds(ctx) {
+  const models = readConfiguredRoute(ctx).models;
+  return new Set((Array.isArray(models) ? models : []).map((m) => m?.id).filter(Boolean));
+}
+
+// 诊断口径：已注入条目中，被 settings 引用却没能从路由端出来的 id。
+// 返回 { referenced, missing }；宿主 API 不可用时 missing 为 null。
+async function registryServedDiagnostics(ctx, overlayIds) {
+  const referenced = [...new Set(overlayIds)].filter((id) => configuredModelIds(ctx).has(id));
+  if (referenced.length === 0) return { referenced, missing: [] };
+  const served = await servedModelIds(ctx);
+  if (served === null) return { referenced, missing: null };
+  return { referenced, missing: referenced.filter((id) => !served.has(id)) };
+}
+
+// 同值触碰后的短重试复核（快照重建是异步的）。
+async function registryMissingWithRetry(ctx, ids, { attempts = 5, delayMs = 150 } = {}) {
+  let missing = ids;
+  for (let i = 0; i < attempts; i++) {
+    const diag = await registryServedDiagnostics(ctx, ids);
+    missing = diag.missing ?? missing;
+    if (missing.length === 0) return [];
+    if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return missing;
+}
+
+// boot 期注入后的自愈复核：缺失即同值触碰，再复核。返回 { ok, touched, referenced, missing }。
+async function ensureRegistryServed(ctx, overlayIds, log) {
+  const before = await registryServedDiagnostics(ctx, overlayIds);
+  if (before.referenced.length === 0) return { ok: true, touched: false, ...before };
+  if (before.missing !== null && before.missing.length === 0) return { ok: true, touched: false, ...before };
+  let touched = false;
+  try {
+    const desc = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
+    const rawModels = desc?.user?.providers?.["github-copilot"]?.models;
+    if (Array.isArray(rawModels)) {
+      await ctx.settings.mutate("llm-pi-ai", [
+        { op: "set", path: ["providers", "github-copilot", "models"], value: rawModels },
+      ], desc.revision);
+      touched = true;
+    }
+  } catch (err) {
+    log?.(`copilot-auth: registry snapshot touch failed — ${String(err?.message ?? err)}`);
+  }
+  const missing = touched ? await registryMissingWithRetry(ctx, before.referenced) : before.missing;
+  const ok = missing !== null && missing.length === 0;
+  if (!ok) {
+    log?.(
+      `copilot-auth: registry-not-served — ${(missing ?? before.referenced).join(",")}`
+        + (touched ? "" : " (同值触碰未执行：settings 未注入或该路由无 models)"),
+    );
+  }
+  return { ok, touched, referenced: before.referenced, missing };
+}
+
 // 启动序列（严格按序 boot 0→1→2；整体 try/catch，失败只记 lastError +
 // logger.warn，绝不阻断挂载；所有写入幂等，崩溃现场下个 boot 安全重试）。
 async function bootRefresh(ctx, opts) {
@@ -375,6 +449,11 @@ async function bootRefresh(ctx, opts) {
           return;
         }
         bootPatched = landed.wrote;
+        // 注册表通道：注入只是把条目放进进程内注册表，宿主快照可能已在挂载时按旧目录
+        // 定稿——用宿主 API 复核，缺失即同值触碰触发重建（ADR 0003 增补）。
+        if (landed.mode === "registry") {
+          await ensureRegistryServed(ctx, overlayEntryIds(state.journal.pendingOverlay), log);
+        }
       }
       state.appliedOverlay = mergeCatalog(state.appliedOverlay, state.journal.pendingOverlay).merged;
       state.appliedProvenance = {
@@ -415,6 +494,16 @@ async function bootRefresh(ctx, opts) {
               if (landed.wrote) state.restartState = restartMarker("self-heal", digest(state.appliedOverlay));
               state = clearLastError(state);
               saveState(stateFile, state);
+              // 注入通常落在宿主快照之后（宿主在挂载时即定稿目录解析结果）——用宿主
+              // 自己的 listModels 复核，缺失即同值触碰触发重建；仍缺失则记可 grep 的
+              // lastError（不写盘、不阻断挂载）。
+              if (landed.mode === "registry") {
+                const served = await ensureRegistryServed(ctx, overlayEntryIds(state.appliedOverlay), log);
+                if (!served.ok) {
+                  state = setLastError(state, `registry-not-served: ${(served.missing ?? served.referenced).join(",")} — injected entries are in the registry but the route still does not serve them`);
+                  saveState(stateFile, state);
+                }
+              }
             }
           }
         } else {
@@ -691,6 +780,9 @@ export function apply(ctx, opts = {}) {
         catalogMode: install ? (install.writable === true ? "file" : "registry") : null,
         registryInjected: overlayEntryIds(state.appliedOverlay).length,
       };
+      // 诊断口径（ADR 0003 增补）：已注入、被 settings 引用、却没能从路由端出来的 id。
+      // "注册表里有了但 picker 里看不到"这类问题的唯一直接证据；宿主 API 不可用时为 null。
+      refresh.settingsNotServed = (await registryServedDiagnostics(ctx, overlayEntryIds(state.appliedOverlay))).missing;
       json(res, 200, { configured, syncError: lastSyncError, refresh });
     },
   });
