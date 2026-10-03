@@ -156,3 +156,12 @@ settings 里还在。
   为 null、`registryInjected` 仍为 2——正是"注入自证通过、宿主快照未采纳"的形态。
   v1.2.6 的「宿主 API 复核 × 同值触碰」修复把该场景纳入 boot1 自愈：重启后 `lastError`
   为空且 `/status.settingsNotServed` 为空数组即为通过证据。
+- **同值触碰实测无效（v1.2.6）**：boot 期同值触碰确实写了 settings（文件 mtime 随之更新到
+  17:37:09），但 `/status` 仍报 `registry-not-served: gpt-6.1-sol`；同一进程里 apply 因
+  `added 0`（写的也是同值）同样 500 `registry-not-effective`。⇒ **同值写不改变配置对象
+  身份 ⇒ 宿主快照不重建**——这是 v1.2.7 改用净零切换的直接依据。
+- **净零切换实测通过（v1.2.7，19:04:35 重启）**：`/status` → `lastError: null`、
+  `settingsNotServed: []`、`registryInjected: 2`、`registryVia: "bare"`、
+  `registryInstanceMismatch: false`；settings 被两次真内容变化写过（mtime 19:04:44）但
+  **内容逐字节不变**（模型列表原样、用户层无残留 `displayName`）。⇒ 重启后注入条目不再
+  被宿主旧快照丢弃；同时排除「注入孤儿模块实例」假设（裸 specifier 取路可用、仅一份实例）。
