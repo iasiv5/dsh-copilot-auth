@@ -1011,10 +1011,34 @@ test("ADR 0003 增补：boot1 注入落在宿主快照之后 → 同值触碰触
     return r;
   };
   await ctx.bootReady;
-  const touch = ctx.settings.mutateCalls.at(-1);
-  assert.deepEqual(touch.ops, [{ op: "set", path: ["providers", "github-copilot", "models"], value: [{ id: "gpt-b" }] }],
-    "同值触碰：写回与当前完全相同的 models 值（绝不改用户内容）");
+  assert.deepEqual(ctx.settings.mutateCalls.map((c) => c.ops[0]), [
+    { op: "set", path: ["providers", "github-copilot", "displayName"], value: "GitHub Copilot " },
+    { op: "unset", path: ["providers", "github-copilot", "displayName"] },
+  ], "净零切换：displayName 先改后复原（用户配置净效果为零）");
+  assert.equal(
+    ctx.settings.mutateCalls.some((c) => c.ops.some((o) => o.path.at(-1) === "models")),
+    false,
+    "绝不写用户的 models 列表",
+  );
   assert.equal(loadStateFile(inst.stateFile).lastError, null, "自愈成功，无 lastError");
+});
+
+test("ADR 0003 增补：用户自带 displayName 时，净零切换必须原值复原（不吞用户定制）", async () => {
+  const inst = makeAsarInstall();
+  const state = {
+    ...freshState(), activated: true, appliedOverlay: overlayEntry(),
+    appliedProvenance: { ...PROVENANCE_0844, appliedAgainstPiAiVersion: "0.87.1" },
+  };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({
+    userLayer: { providers: { "github-copilot": { displayName: "My Copilot", models: [{ id: "gpt-b" }] } } },
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  servedRef(ctx, []);
+  await ctx.bootReady;
+  assert.deepEqual(ctx.settings.mutateCalls.map((c) => c.ops[0]), [
+    { op: "set", path: ["providers", "github-copilot", "displayName"], value: "My Copilot " },
+    { op: "set", path: ["providers", "github-copilot", "displayName"], value: "My Copilot" },
+  ], "触碰期间沿用用户原值，结束时原样复原");
 });
 
 test("ADR 0003 增补：触碰后仍端不出来 → lastError 记 registry-not-served（可 grep），/status 报 settingsNotServed", async () => {

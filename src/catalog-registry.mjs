@@ -37,7 +37,21 @@ export function registryDistDir(install) {
   return dirname(dirname(dirname(install.catalogFile)));
 }
 
-// 依次尝试「裸 specifier → 绝对路径 file URL」加载目录注册表模块。
+// 诊断：最近一次成功注入走的取路方式（bare = 宿主解析拦截给出的同一实例；
+// file = asar 绝对路径），以及两条路是否给出了**不同**的模块实例（(b) 类故障的直接证据）。
+let lastVia = null;
+let lastInstanceMismatch = false;
+export function registryVia() {
+  return lastVia;
+}
+export function registryInstanceMismatch() {
+  return lastInstanceMismatch;
+}
+
+// 依次尝试「裸 specifier → 绝对路径 file URL」加载目录注册表模块。两条路都试：若它们
+// 给出的注册表对象**不是同一个**，说明进程里存在两份模块实例，而宿主用的是它自己解析
+// 出来的那份（裸 specifier 走宿主的解析拦截）——此时必须优先裸 specifier，否则我们注入
+// 的是一份孤儿副本（现象：注入"成功"、路由永远端不出来）。
 // 两条路的返回都做形状校验：注册表必须是可写对象、getBuiltinModels 必须是函数。
 export async function loadRegistryModules(install, log) {
   const dist = registryDistDir(install);
@@ -50,6 +64,7 @@ export async function loadRegistryModules(install, log) {
     },
   ];
   const errors = [];
+  const loaded = [];
   for (const attempt of attempts) {
     try {
       const models = await import(attempt.models);
@@ -61,13 +76,25 @@ export async function loadRegistryModules(install, log) {
       if (typeof all?.getBuiltinModels !== "function") {
         throw new TypeError("getBuiltinModels unavailable");
       }
-      return { via: attempt.via, registry, all, errors };
+      loaded.push({ ...attempt, registry, all });
     } catch (err) {
       errors.push(`${attempt.via}: ${err?.code ?? ""} ${err?.message ?? err}`.trim());
     }
   }
-  log?.(`copilot-auth: registry modules unavailable — ${errors.join(" | ")}`);
-  return { via: null, registry: null, all: null, errors };
+  if (loaded.length === 0) {
+    log?.(`copilot-auth: registry modules unavailable — ${errors.join(" | ")}`);
+    return { via: null, registry: null, all: null, errors, instanceMismatch: false };
+  }
+  const bare = loaded.find((x) => x.via === "bare");
+  const file = loaded.find((x) => x.via === "file");
+  const instanceMismatch = bare !== undefined && file !== undefined && bare.registry !== file.registry;
+  const chosen = bare ?? file; // 有裸 specifier 就用它（宿主实例优先）
+  if (instanceMismatch) {
+    log?.("copilot-auth: registry module instance mismatch — bare 与 file URL 给出两份实例，已选用裸 specifier（宿主实例）");
+  }
+  lastVia = chosen.via;
+  lastInstanceMismatch = instanceMismatch;
+  return { via: chosen.via, registry: chosen.registry, all: chosen.all, errors, instanceMismatch };
 }
 
 // 注入 catalog-shaped 增量（{ api: { id: entry } }），返回报告对象（绝不抛）。

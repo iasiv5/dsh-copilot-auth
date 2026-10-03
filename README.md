@@ -22,7 +22,7 @@
 - 🔄 **手动补充新模型目录条目**：GHC 设置页一键刷新——diff 预览 + 二次确认；可写安装树走数据级目录补丁（**pi-ai 版本不动**），**只读安装树（desktop `app.asar`）走进程内目录注册表注入**（ADR 0003：零写盘、无需重启），新模型（如 `gpt-6.1-sol`）即可加入、失效模型镜像移除
 - 🌐 **中/英双语界面**：跟随 DSH 语言设置自动切换
 - 🔑 **凭据安全托管**：存入 DSH 内置凭据库（文件强制 0600 权限），Copilot 临时 token 到期自动刷新
-- 🧪 **测试与 CI**：139 条单元测试（ubuntu/windows/macos 三平台矩阵）；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
+- 🧪 **测试与 CI**：140 条单元测试（ubuntu/windows/macos 三平台矩阵）；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
 
 ## 前置要求
 
@@ -32,7 +32,8 @@
 
 | 本插件 | DSH 实测版本 | authorization 服务 | 说明 |
 |---|---|---|---|
-| v1.2.6+ | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | **重启后自动恢复**：注入后以宿主 `listModels` 复核，未端出即同值触碰触发快照重建（修复 v1.2.5 的"重启后注入条目被宿主旧快照丢弃"）；`/status.settingsNotServed` 可直接诊断 |
+| v1.2.7+ | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | **重启后自动恢复**：注入后以宿主 `listModels` 复核，未端出即**净零切换**（`displayName` 改后复原；两次真内容变化 ⇒ 宿主必然重建快照，用户配置逐字节不变）触发重建；另加双路取实例 + `registryInstanceMismatch`/`registryVia` 诊断。修复 v1.2.6 的"同值写不改变配置身份 ⇒ 快照不重建" |
+| v1.2.6 | `0.1.7-rc.2`+ | runtime 内置，插件不挂载 | 首次引入宿主侧复核与 `settingsNotServed` 诊断；重启自愈用的"同值触碰"**实测不足**（同值写不改变配置对象身份），重启后模型可能仍不出现——请用 v1.2.7 |
 | v1.2.5 | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | **desktop 只读形态可刷新**：进程内目录注册表注入（ADR 0003），无需重启、不碰官方产物；`0.2.0-rc.2` desktop **实机端到端已验**（注入条目完成真实推理请求）；同批修复 pi-ai ≥0.99.0 的 `chat:` 目录键格式。**已知缺陷**：重启后若宿主快照先于注入定稿，注入条目会被丢弃（v1.2.6 修复） |
 | v1.2.4 | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | desktop asar 只读形态：目录刷新入口显式置灰（ADR 0002），登录/路由/settings 不受影响 |
 | v1.2.0 ～ v1.2.3 | `0.1.7-rc.2` ～ `0.2.0-rc.1`（web/服务形态） | runtime 内置，插件不挂载 | 适配 settings API 重塑后的 describe() 行形状；desktop asar 形态下目录刷新不可用且报错不友好 |
@@ -86,7 +87,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 - **可写性门禁（v1.2.4 起，ADR 0002）**：dsh-desktop（Electron）把整个运行时树打包进只读的 `resources/app.asar`，pi-ai 是其中唯一副本——读一切正常、写必被拒。插件在写盘前对目标做可写性分类（asar 路径识别 + 探针文件实测）：不可写时 preview/`/status` 暴露 `catalogWritable:false`，**v1.2.4 起该形态按只读处理**（v1.2.3 及之前会抛 `ENOENT ... not found in ...app.asar` 天书并遗留 prepared journal）。Web/服务部署形态（pi-ai 在真实磁盘）行为不变。
 - **只读安装树的落地通道（v1.2.5 起，ADR 0003）**：只读目标不再意味着"刷新不可用"。写入面换成了 pi-ai 的**进程内目录注册表**（`MODELS["github-copilot"]`，DSH 每次构建快照都现读它）：插件把增量条目注入该对象，内置 `GitHub Copilot` 路由即把新模型端出来——OAuth 凭据、消息翻译、三协议分派（按条目自带的 `api`）、picker/设置页全部复用既有链路，**不新增路由、不改宿主任何文件、不碰官方安装树、无需重启**。注入成功才写 settings，随后用 `ctx.llm.listModels` 端到端自证；任一条目端不出来即**回滚 settings** 并返回 500 `registry-not-effective`（绝不产出"能选中但发不出去"的假模型）。注册表面不可用（模块加载失败 / 注册表被冻结 / 条目非法）一律结构化报错并保留 journal，可 grep `registry-*`。`/status` 的 `catalogMode`（`file`|`registry`）与 `registryInjected` 可观测。**可写安装树完全不加载注册表面**，web 形态零新增副作用。
 - **远端目录形状规范化（v1.2.5 起）**：pi-ai ≥0.99.0 把目录 JSON 的键改成 `chat:<内层裸 id>`（运行时仍按裸 id 编键）。插件在 preview/apply 共用的取数层统一规范化回裸 id 形状，并跳过键与内层 id 冲突的条目——**不规范化时刷新会"拿到新目录却一个条目都加不进来"**，这条修复对 Web/服务形态同样生效。
-- **重启后的自愈与快照时序（v1.2.6 起）**：注册表注入只活在进程里，重启后由启动序列（boot1）重放。但 `dsh-llm-pi-ai` 在**挂载时**就把目录解析结果定稿并 memoize（只在 settings 配置对象身份变化时重建），而插件挂载晚于它——boot 期注入可能落在快照之后，表现为"settings 里还有该模型、picker 里却看不到"。v1.2.6 起注入后会用**宿主自己的** `listModels` 复核；缺失即对该路由 `models` 做一次**同值触碰**（写回与当前完全相同的值，只改配置对象身份、不改用户内容）触发重建，再复核。仍端不出来时记可 grep 的 `lastError: registry-not-served: <ids>`，并把结果暴露在 `/status.settingsNotServed`（宿主 API 不可用时为 `null`）。用户没引用的条目一律不触碰 settings——启动期不写用户配置的原则不破。
+- **重启后的自愈与快照时序（v1.2.6 起，v1.2.7 修正）**：注册表注入只活在进程里，重启后由启动序列（boot1）重放。但 `dsh-llm-pi-ai` 在**挂载时**就把目录解析结果定稿并 memoize（只在 settings 配置对象**身份**变化时重建），而插件挂载晚于它——boot 期注入可能落在快照之后，表现为"settings 里还有该模型、picker 里却看不到"。插件注入后会立刻用**宿主自己的** `listModels` 复核；**同值写回无效**（实测：同值不改变配置身份 ⇒ 快照不重建），因此 v1.2.7 改为**净零切换**：把该路由 `displayName` 改成「原值 + 尾随空格」再改回原值（该键非用户所有则 `unset`）——两次都是真内容变化，**用户配置逐字节不变**，宿主必然重建快照。仍端不出来时记可 grep 的 `lastError: registry-not-served: <ids>`，并暴露 `/status.settingsNotServed`（宿主 API 不可用时 `null`）、`registryVia`（`bare`/`file`）与 `registryInstanceMismatch`（`true` = 进程里存在两份 pi-ai 模块实例）。用户没引用的条目一律不触碰 settings。
 
 ## 工作原理
 
@@ -101,7 +102,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 
 ```bash
 npm install
-npm test        # node:test：patch 结构 + host/目录/状态机/启动序列/可写性门禁/注册表注入 共 139 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
+npm test        # node:test：patch 结构 + host/目录/状态机/启动序列/可写性门禁/注册表注入 共 140 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
 npm run build   # esbuild 打包 client 到 lib/client.js（__ModuleLoader__ 信封）
 npm pack --dry-run
 ```
