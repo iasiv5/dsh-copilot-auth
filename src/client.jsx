@@ -55,6 +55,10 @@ const DICTS = {
     srcOverlay: "Catalog source: bundled overlay (offline bootstrap)",
     none: "(none)",
     notWritable: "This DSH installation packages the model catalog read-only (inside app.asar) — the refresh cannot be written. Use a web/service deployment for catalog refresh, or wait for a desktop build that unpacks pi-ai.",
+    registryMode: "This installation's app.asar is read-only, so the refresh does not write the catalog file: new entries are injected into the running catalog registry instead. No restart needed.",
+    registryApplied: "Injected %s new model(s) into the running catalog — live now. The boot sequence replays them after a restart.",
+    registryFailed: "Catalog registry injection failed — nothing was written and your model list was left unchanged.",
+    riskImmediate: "Takes effect immediately in this process (registry injection); the boot sequence replays it after a restart.",
   },
   zh: {
     nav: "GHC设置",
@@ -99,10 +103,25 @@ const DICTS = {
     srcOverlay: "目录来源：内置覆盖层（离线 bootstrap）",
     none: "（无）",
     notWritable: "当前 DSH 安装把模型目录打包在只读的 app.asar 内，刷新无法写入。请在 Web/服务部署形态下刷新目录，或等待桌面版提供可写布局后重试。",
+    registryMode: "当前安装的 app.asar 只读，刷新不写目录文件：新条目直接注入运行中的目录注册表。无需重启。",
+    registryApplied: "已向运行中的目录注入 %s 个新模型——即刻生效；重启后由启动序列自动重放。",
+    registryFailed: "目录注册表注入失败——未写入任何内容，模型列表保持原样。",
+    riskImmediate: "本进程内即刻生效（注册表注入）；重启后由启动序列自动重放。",
   },
 };
 
 const NAV_TEXTS = Object.keys(DICTS).map((locale) => DICTS[locale].nav);
+
+// 落地通道判定（ADR 0003）：只读安装树 + catalogMode==="registry" = 刷新可用
+// （走进程内目录注册表注入，无需重启）；"不可写且无替代通道"（旧宿主 / 注入面
+// 不可用）才置灰入口。两个判据必须分开，否则 desktop 上会继续误置灰。
+function isRegistryMode(flags) {
+  return flags?.catalogWritable === false && flags?.catalogMode === "registry";
+}
+
+function refreshBlocked(flags) {
+  return flags?.catalogWritable === false && flags?.catalogMode !== "registry";
+}
 
 // octicons copilot-16（MIT，github/primer）——单色 currentColor，随主题变色
 const COPILOT_ICON_SVG =
@@ -254,8 +273,11 @@ function RefreshModal({ t, flow, onConfirm, onCancel, onOverlay }) {
         )}
         <p style={styles.risk}>⚠ {t("riskRemoved")}</p>
         <p style={styles.risk}>⚠ {t("riskReset")}</p>
-        <p style={styles.risk}>⚠ {t("riskRestart")}</p>
-        {p.catalogWritable === false && <p style={styles.error}>⚠ {t("notWritable")}</p>}
+        {isRegistryMode(p)
+          ? <p style={styles.modalText}>{t("riskImmediate")}</p>
+          : <p style={styles.risk}>⚠ {t("riskRestart")}</p>}
+        {isRegistryMode(p) && <p style={styles.banner}>ⓘ {t("registryMode")}</p>}
+        {refreshBlocked(p) && <p style={styles.error}>⚠ {t("notWritable")}</p>}
         <div style={styles.modalActions}>
           {p.catalogSource === "local" && (
             <button type="button" style={{ ...styles.button, ...styles.secondary, marginRight: "auto" }} onClick={onOverlay}>
@@ -265,8 +287,8 @@ function RefreshModal({ t, flow, onConfirm, onCancel, onOverlay }) {
           <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
           <button
             type="button"
-            style={{ ...styles.button, ...styles.primary, ...(p.catalogWritable === false ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-            disabled={p.catalogWritable === false}
+            style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(p) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+            disabled={refreshBlocked(p)}
             onClick={onConfirm}
           >
             {t("confirmRefresh")}
@@ -410,22 +432,31 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
           <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={logout}>{t("logout")}</button>
           <button
             type="button"
-            style={{ ...styles.button, ...styles.primary, ...(flow.catalogWritable === false ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-            disabled={flow.catalogWritable === false || flow.name === "previewing" || flow.name === "applying"}
+            style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(flow) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+            disabled={refreshBlocked(flow) || flow.name === "previewing" || flow.name === "applying"}
             onClick={() => drive({ type: "start" })}
           >
             {flow.name === "previewing" ? t("refreshing") : flow.name === "applying" ? t("applying") : t("refreshNow")}
           </button>
         </div>
       )}
-      {page === "authorized" && flow.catalogWritable === false && flow.name !== "failed" && (
+      {page === "authorized" && isRegistryMode(flow) && flow.name !== "failed" && (
+        <p style={styles.banner}>ⓘ {t("registryMode")}</p>
+      )}
+      {page === "authorized" && refreshBlocked(flow) && flow.name !== "failed" && (
         <p style={styles.banner}>⚠ {t("notWritable")}</p>
+      )}
+      {page === "authorized" && flow.name === "applied" && (
+        <p style={styles.banner}>{t("registryApplied").replace("%s", String(flow.injected ?? 0))}</p>
       )}
       {page === "authorized" && flow.name === "restartNeeded" && (
         <p style={styles.banner}>⚠ {t("restartNeeded")}</p>
       )}
       {page === "authorized" && flow.name === "failed" && (
-        <p style={styles.error}>{flow.error === "state-corrupt" ? t("stateCorrupt") : flow.error === "catalog-not-writable" ? t("notWritable") : flow.error}</p>
+        <p style={styles.error}>{flow.error === "state-corrupt" ? t("stateCorrupt")
+          : flow.error === "catalog-not-writable" ? t("notWritable")
+          : flow.error === "registry-inject-failed" || flow.error === "registry-not-effective" ? t("registryFailed")
+          : flow.error}</p>
       )}
       {flow.name === "confirming" && (
         <RefreshModal

@@ -100,6 +100,74 @@ export function mergeCatalog(local, remote) {
   return { merged, added, addedOverlay, skipped };
 }
 
+// ==================== 远端目录的形状规范化（pi-ai ≥0.99.0 的 chat: 键） ====================
+// pi-ai ≥0.99.0（实测 0.99.2 / 1.0.0，两份字节相同）把目录 JSON 的键改成
+// `chat:<内层裸 id>`（flattenChatModelCatalog 的产物）：这不是改名——运行时仍按条目
+// 内层的裸 id 编键，github-copilot 的 filterModels 也按裸 id 与账号可用集匹配。
+// 本模块的 mergeCatalog/validateCatalog 假定「键 == 条目内层 id」，因此远端目录
+// 必须先规范化回三段式裸 id 形状，两个世代的语义才一致。
+export const CHAT_KEY_PREFIX = "chat:";
+
+// 把远端目录（0.87.x 裸键 / ≥0.99.0 `chat:` 键）规范化为 `{ api: { 裸id: entry } }`。
+// 条目内层 id 与键冲突的条目一律跳过并记录（宁可少一个模型，不可写坏目录）。
+// allowedKeys 非空时按本机目录已见字段集合裁剪（见 trimEntryToShape）。
+// 返回 { catalog, renamed, skipped }。
+export function normalizeRemoteCatalog(data, { allowedKeys } = {}) {
+  const catalog = {};
+  const skipped = [];
+  let renamed = 0;
+  for (const [api, section] of Object.entries(data ?? {})) {
+    if (!section || typeof section !== "object" || Array.isArray(section)) {
+      skipped.push({ api, id: null, reason: "section is not an object" });
+      continue;
+    }
+    for (const [key, entry] of Object.entries(section)) {
+      const prefixed = key.startsWith(CHAT_KEY_PREFIX);
+      const id = prefixed ? key.slice(CHAT_KEY_PREFIX.length) : key;
+      if (id.length === 0) {
+        skipped.push({ api, id: key, reason: "empty id after prefix strip" });
+        continue;
+      }
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        skipped.push({ api, id, reason: "entry is not an object" });
+        continue;
+      }
+      if (typeof entry.id === "string" && entry.id !== id) {
+        skipped.push({ api, id, reason: `id mismatch: key=${key} entry.id=${entry.id}` });
+        continue;
+      }
+      if (prefixed) renamed += 1;
+      (catalog[api] ??= {})[id] = trimEntryToShape(entry, allowedKeys);
+    }
+  }
+  return { catalog, renamed, skipped };
+}
+
+// 把条目裁剪到本机运行时已见过的字段集合（allowedKeys 来自 catalogShapeKeys）。
+// 典型漂移：≥0.99.0 的条目多一个 `type: "chat"`，0.87.x 的模型对象里没有这个概念。
+// allowedKeys 为空集时不裁剪——拿不到参考形状时宁可不裁剪，也不误删必需字段。
+export function trimEntryToShape(entry, allowedKeys) {
+  if (!allowedKeys || allowedKeys.size === 0) return { ...entry };
+  const out = {};
+  for (const [k, v] of Object.entries(entry)) {
+    if (allowedKeys.has(k)) out[k] = v;
+  }
+  return out;
+}
+
+// 本机目录条目的字段并集——注入/规范化条目的裁剪基准。
+export function catalogShapeKeys(localCatalog) {
+  const keys = new Set();
+  for (const section of Object.values(localCatalog ?? {})) {
+    for (const entry of Object.values(section ?? {})) {
+      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+        for (const k of Object.keys(entry)) keys.add(k);
+      }
+    }
+  }
+  return keys;
+}
+
 // R3：removed 以 target 为准，不以 available 为准——available 但目录不可解析的
 // 当前模型必须进 removed（settings 校验拒绝目录外 id，保留必报错）。
 export function diffModels(currentIds, availableIds, catalogIds) {

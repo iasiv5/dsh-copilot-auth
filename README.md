@@ -19,10 +19,10 @@
 - 🔐 **设备码登录/注销**：网页 + user code，免 API Token；SSO 组织授权友好
 - 🧩 **预置提供方路由**：安装即出现在 Models 页，无需手动配置
 - 📦 **模型目录兜底填充**：登录成功时，若 GitHub Copilot 路由还没有模型目录，自动填入账号全部可用模型；你已精简/定制过的目录**永不覆盖**（重启、重新登录均不重置）
-- 🔄 **手动补充新模型目录条目**：GHC 设置页一键刷新——diff 预览 + 二次确认 + 数据级目录补丁（**pi-ai 版本不动**），新模型（如 gemini-3.8-flash）即可加入、失效模型镜像移除
+- 🔄 **手动补充新模型目录条目**：GHC 设置页一键刷新——diff 预览 + 二次确认；可写安装树走数据级目录补丁（**pi-ai 版本不动**），**只读安装树（desktop `app.asar`）走进程内目录注册表注入**（ADR 0003：零写盘、无需重启），新模型（如 `gpt-6.1-sol`）即可加入、失效模型镜像移除
 - 🌐 **中/英双语界面**：跟随 DSH 语言设置自动切换
 - 🔑 **凭据安全托管**：存入 DSH 内置凭据库（文件强制 0600 权限），Copilot 临时 token 到期自动刷新
-- 🧪 **测试与 CI**：114 条单元测试（ubuntu/windows/macos 三平台矩阵）；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
+- 🧪 **测试与 CI**：136 条单元测试（ubuntu/windows/macos 三平台矩阵）；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
 
 ## 前置要求
 
@@ -32,7 +32,8 @@
 
 | 本插件 | DSH 实测版本 | authorization 服务 | 说明 |
 |---|---|---|---|
-| v1.2.4+ | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | desktop asar 只读形态：目录刷新入口显式置灰（ADR 0002），登录/路由/settings 不受影响 |
+| v1.2.5+ | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | **desktop 只读形态可刷新**：进程内目录注册表注入（ADR 0003），无需重启、不碰官方产物；同批修复 pi-ai ≥0.99.0 的 `chat:` 目录键格式 |
+| v1.2.4 | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | desktop asar 只读形态：目录刷新入口显式置灰（ADR 0002），登录/路由/settings 不受影响 |
 | v1.2.0 ～ v1.2.3 | `0.1.7-rc.2` ～ `0.2.0-rc.1`（web/服务形态） | runtime 内置，插件不挂载 | 适配 settings API 重塑后的 describe() 行形状；desktop asar 形态下目录刷新不可用且报错不友好 |
 | v1.1.x | `0.1.2-rc.1` ～ `0.1.5-rc.2` | 由 cordis.patch.yml insert 挂载 | v1.2.0 起移除该补丁，旧版 DSH 上无法激活 |
 
@@ -76,13 +77,14 @@ dsh plugin --profile web add @inventec/dsh-copilot-auth
 
 pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 gemini-3.8-flash）在本机无法解析、失效模型残留。「刷新可用模型目录」按钮（GHC 设置页，登录后可见）在不升级 pi-ai 的前提下解决这一问题。
 
-- **两阶段生效**：确认后先对本机 `github-copilot.json` 做原子数据级补丁（pi-ai 代码版本不变）；**重启 dsh web 后**插件再把 settings 模型目录镜像重建为「账号可用 ∩ 目录可解析」集合（目录在模块加载时读取，同 boot 内写完目录不会同步 settings）。
+- **生效时机按落地通道分叉**：可写安装树（web/服务）→ 先对本机 `github-copilot.json` 做原子数据级补丁（pi-ai 代码版本不变），**重启 dsh web 后**插件再把 settings 模型目录镜像重建为「账号可用 ∩ 目录可解析」集合（目录在模块加载时读取，同 boot 内写完目录不会同步 settings）；只读安装树（desktop `app.asar`）→ 进程内注册表注入（ADR 0003），**当次生效、无需重启**。
 - **diff 预览 + 二次确认**：弹窗展示新增（绿）/移除（红）/保留计数、被校验跳过的上游条目、以及**将被重置的定制名单**（字段微调与 modelOverrides）。确认前请核对三条风险：失效模型将消失、你的定制将被重置、需重启后才生效。
-- **激活边界**：插件首次安装/升级后处于未激活态，启动时不触碰 pi-ai 安装树；只有成功执行过一次手动刷新后才激活。DSH 升级冲掉补丁后，已激活实例启动时自愈重放**历史上实际应用过**的补丁条目（内置覆盖层仅作离线数据源，绝不自动应用）。
-- **数据源与回退**：账号可用模型现场拉取（失败回退凭证缓存）；目录数据从 npm 拉取最新 pi-ai tarball（强制 `dist.integrity` 校验、超时与大小上限、tar 严格解析），失败时可改用内置覆盖层（0.85.1 收割，integrity `sha512-+VgVIJDkDO2efYJKEEqvPTH4zmnIaXdAppGbO+vKFA9qy5PdhFiAenuFAkU+oiCSfOC4dMHDyrjdQeL4ZoC5CQ==`）出 diff。
+- **激活边界**：插件首次安装/升级后处于未激活态，启动时不触碰 pi-ai 安装树；只有成功执行过一次手动刷新后才激活。DSH 升级冲掉补丁后，已激活实例启动时自愈重放**历史上实际应用过**的补丁条目（内置覆盖层仅作离线数据源，绝不自动应用）。- **数据源与回退**：账号可用模型现场拉取（失败回退凭证缓存）；目录数据从 npm 拉取最新 pi-ai tarball（强制 `dist.integrity` 校验、超时与大小上限、tar 严格解析），失败时可改用内置覆盖层（0.85.1 收割，integrity `sha512-+VgVIJDkDO2efYJKEEqvPTH4zmnIaXdAppGbO+vKFA9qy5PdhFiAenuFAkU+oiCSfOC4dMHDyrjdQeL4ZoC5CQ==`）出 diff。
 - **只增不更新**：合并只补充本机从未见过的模型条目；上游对已有 id 的元数据修正（api 归属、contextWindow 等）不会同步——这是「永不覆盖」语义的代价（ADR 0001）。
 - **digest 绑定**：preview 与 apply 之间以输入 digest（settings 完整配置 / 可用模型 / 本地目录 / 目录来源）绑定，任何漂移即 409 并要求重新预览确认。
-- **可写性门禁（v1.2.4 起，ADR 0002）**：dsh-desktop（Electron）把整个运行时树打包进只读的 `resources/app.asar`，pi-ai 是其中唯一副本——读一切正常、写必被拒。插件在写盘前对目标做可写性分类（asar 路径识别 + 探针文件实测）：不可写时 preview/`/status` 暴露 `catalogWritable:false`、UI 置灰刷新入口并给出解释文案，apply 在 write-ahead **之前**以 400 `catalog-not-writable` 结构化快速失败（绝不留下 prepared journal）；boot 序列遇到只读目标同样不重试写盘，journal/overlay 原样保留，目标变可写（如桌面版改为解包 pi-ai）后恢复/自愈自动完成。Web/服务部署形态（pi-ai 在真实磁盘）行为不变。
+- **可写性门禁（v1.2.4 起，ADR 0002）**：dsh-desktop（Electron）把整个运行时树打包进只读的 `resources/app.asar`，pi-ai 是其中唯一副本——读一切正常、写必被拒。插件在写盘前对目标做可写性分类（asar 路径识别 + 探针文件实测）：不可写时 preview/`/status` 暴露 `catalogWritable:false`，**v1.2.4 起该形态按只读处理**（v1.2.3 及之前会抛 `ENOENT ... not found in ...app.asar` 天书并遗留 prepared journal）。Web/服务部署形态（pi-ai 在真实磁盘）行为不变。
+- **只读安装树的落地通道（v1.2.5 起，ADR 0003）**：只读目标不再意味着"刷新不可用"。写入面换成了 pi-ai 的**进程内目录注册表**（`MODELS["github-copilot"]`，DSH 每次构建快照都现读它）：插件把增量条目注入该对象，内置 `GitHub Copilot` 路由即把新模型端出来——OAuth 凭据、消息翻译、三协议分派（按条目自带的 `api`）、picker/设置页全部复用既有链路，**不新增路由、不改宿主任何文件、不碰官方安装树、无需重启**。注入成功才写 settings，随后用 `ctx.llm.listModels` 端到端自证；任一条目端不出来即**回滚 settings** 并返回 500 `registry-not-effective`（绝不产出"能选中但发不出去"的假模型）。注册表面不可用（模块加载失败 / 注册表被冻结 / 条目非法）一律结构化报错并保留 journal，可 grep `registry-*`。`/status` 的 `catalogMode`（`file`|`registry`）与 `registryInjected` 可观测。**可写安装树完全不加载注册表面**，web 形态零新增副作用。
+- **远端目录形状规范化（v1.2.5 起）**：pi-ai ≥0.99.0 把目录 JSON 的键改成 `chat:<内层裸 id>`（运行时仍按裸 id 编键）。插件在 preview/apply 共用的取数层统一规范化回裸 id 形状，并跳过键与内层 id 冲突的条目——**不规范化时刷新会"拿到新目录却一个条目都加不进来"**，这条修复对 Web/服务形态同样生效。
 
 ## 工作原理
 
@@ -97,7 +99,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 
 ```bash
 npm install
-npm test        # node:test：patch 结构 + host/目录/状态机/启动序列/可写性门禁共 114 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
+npm test        # node:test：patch 结构 + host/目录/状态机/启动序列/可写性门禁/注册表注入 共 136 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
 npm run build   # esbuild 打包 client 到 lib/client.js（__ModuleLoader__ 信封）
 npm pack --dry-run
 ```
@@ -106,6 +108,7 @@ npm pack --dry-run
 |---|---|
 | `cordis.patch.yml` | 两段 patch（本插件 entry / 预置路由；authorization 服务 0.1.7+ 由 runtime 内置，不再挂载） |
 | `src/host.mjs` · `src/shared.mjs` | host 半区：登录状态机、6 条本地路由、模型目录同步、刷新 preview/apply 与启动序列 |
+| `src/catalog-registry.mjs` | 只读安装树的落地通道：进程内目录注册表注入（ADR 0003） |
 | `src/client.jsx` | client 半区：settings.section 插槽 + 设备码交互 + 双语文案 |
 | `scripts/build-client.mjs` | client 打包（`__ModuleLoader__` CJS 工厂信封） |
 | `lib/client.js` | 构建产物（入库，使 git 安装免构建） |
@@ -125,9 +128,9 @@ npm pack --dry-run
 - 路由前缀 `/copilot-auth` 两侧硬编码，不可配置
 - DSH rc 版本耦合：实测 `0.1.7-rc.2` 与 `0.2.0-rc.1`（v1.2.x；`0.1.2-rc.1` 由 v1.1.x 实测），peer 仅 `@deepseek-ai/cordis@^4.0.2`
 - 模型目录只在「尚不存在」时由登录成功兜底填充一次，填充后归用户所有：账号新增的模型不会自动出现——用 GHC 设置页的「**刷新可用模型目录**」同步（见上节），或在 Models 页手动添加
-- 模型目录只写入 pi-ai 内置目录已描述的模型：目录快照外的新模型需先经「刷新可用模型目录」补入目录条目（数据级补丁，pi-ai 版本不变）才会出现在可选列表
+- 模型目录只写入「可解析」的模型：目录快照外的新模型须先经「刷新可用模型目录」补入——可写安装树补进目录文件、只读安装树（desktop）注入进程内注册表（ADR 0003），两条通道都保持 pi-ai 版本不变
 - DSH 升级后自愈仅在 pi-ai 基线版本不变（0.84.4）时重放；跨版本且条目未原生存在时上报 `self-heal-incompatible`，不修改安装树（重新执行一次手动刷新即可在新基线上激活）
-- **dsh-desktop（Electron 桌面版）无法刷新模型目录**：运行时树（含 pi-ai 唯一副本）打包在只读的 `app.asar` 内，数据级目录补丁物理不可写。v1.2.4 起该形态被显式识别：刷新入口置灰 + `catalog-not-writable` 结构化报错（v1.2.3 及之前会抛 `ENOENT ... not found in ...app.asar` 天书并遗留 prepared journal）。登录/注销/settings 模型目录镜像不受影响；目录刷新请用 Web/服务部署形态（ADR 0002）
+- **dsh-desktop（Electron 桌面版）可刷新模型目录（v1.2.5 起）**：运行时树打包在只读的 `app.asar` 内，写盘通道物理不可用，但刷新改走进程内目录注册表注入（ADR 0003）——当次生效、无需重启、不碰官方产物。前提是该进程的 pi-ai 目录注册表形态与实测一致（`MODELS[provider]` 未冻结、扁平、键=模型 id）；上游改形状时注入守卫会拦下并报 `registry-*` 结构化错误，模型列表保持原样（不写 settings）。v1.2.4 及之前该形态只能置灰刷新入口（`catalog-not-writable`，另见 ADR 0002）
 - 并发保护为宿主单进程内 mutex，**不支持多实例/多进程并发刷新**
 - 状态落盘后的目录 fsync 仅在 POSIX 执行：Windows 无目录 fsync 语义（对目录句柄 fsync 必然 `EPERM`），win32 直接跳过、不再刷告警，目录项一致性由 NTFS 元数据日志保证（v1.2.3 起，issue #1）；POSIX 行为不变
 

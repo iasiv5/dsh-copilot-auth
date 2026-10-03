@@ -798,13 +798,63 @@ function makeAsarInstall() {
   const catalogFile = join(root, "dist", "providers", "data", "github-copilot.json");
   writeFileSync(catalogFile, FIXTURE_0844);
   const packageJsonFile = join(root, "package.json");
-  writeFileSync(packageJsonFile, JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.87.1" }));
+  writeFileSync(packageJsonFile, JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.87.1", type: "module" }));
+  // 目录注册表注入面（ADR 0003）：与真实 pi-ai 同构的两个模块——未冻结的
+  // GITHUB_COPILOT_MODELS（键 = 模型 id）+ 每次调用现读它的 getBuiltinModels()。
+  writeFileSync(
+    join(root, "dist", "providers", "github-copilot.models.js"),
+    "export const GITHUB_COPILOT_MODELS = {\n"
+      + '  "gpt-a": { id: "gpt-a", api: "openai-completions", provider: "github-copilot", contextWindow: 1000, maxTokens: 100 },\n'
+      + '  "gpt-reg": { id: "gpt-reg", api: "openai-responses", provider: "github-copilot", contextWindow: 2000, maxTokens: 200 },\n'
+      + "};\n",
+  );
+  writeFileSync(
+    join(root, "dist", "providers", "all.js"),
+    'import { GITHUB_COPILOT_MODELS } from "./github-copilot.models.js";\n'
+      + 'export function getBuiltinModels(provider) { return provider === "github-copilot" ? Object.values(GITHUB_COPILOT_MODELS) : []; }\n',
+  );
   const overlayFile = join(dir, "overlay.json");
   writeFileSync(overlayFile, JSON.stringify(OVERLAY, null, 2) + "\n");
   return { dir, root, catalogFile, packageJsonFile, stateFile: join(dir, "state.json"), overlayFile };
 }
 
-test("ADR 0002：asar 只读目标——preview 暴露 catalogWritable=false，apply 400 在 write-ahead 之前拦截，零落盘", async () => {
+// 可写安装树 + 同名注册表模块：证明 web/服务形态（可写目标）**完全不碰**新通道——
+// 目录文件就是运行时加载的副本，注册表面只在只读安装树（desktop asar）上才有意义。
+function makeWritableInstallWithRegistry() {
+  const dir = mkdtempSync(join(tmpdir(), "host-rw-"));
+  const root = join(dir, "node_modules", "@earendil-works", "pi-ai");
+  mkdirSync(join(root, "dist", "providers", "data"), { recursive: true });
+  const catalogFile = join(root, "dist", "providers", "data", "github-copilot.json");
+  writeFileSync(catalogFile, FIXTURE_0844);
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.87.1", type: "module" }));
+  writeFileSync(
+    join(root, "dist", "providers", "github-copilot.models.js"),
+    'export const GITHUB_COPILOT_MODELS = {\n'
+      + '  "gpt-reg": { id: "gpt-reg", api: "openai-responses", provider: "github-copilot", contextWindow: 2000, maxTokens: 200 },\n'
+      + "};\n",
+  );
+  writeFileSync(
+    join(root, "dist", "providers", "all.js"),
+    'import { GITHUB_COPILOT_MODELS } from "./github-copilot.models.js";\n'
+      + 'export function getBuiltinModels(provider) { return provider === "github-copilot" ? Object.values(GITHUB_COPILOT_MODELS) : []; }\n',
+  );
+  const overlayFile = join(dir, "overlay.json");
+  writeFileSync(overlayFile, JSON.stringify(OVERLAY, null, 2) + "\n");
+  return { dir, root, catalogFile, packageJsonFile: join(root, "package.json"), stateFile: join(dir, "state.json"), overlayFile };
+}
+
+test("ADR 0003：可写安装树（web/服务形态）不咨询注册表面——目录文件即运行时副本（gpt-reg 不被并入）", async () => {
+  const inst = makeWritableInstallWithRegistry();
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-a", "gpt-reg"] } } },
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(ctx.settings.mutateCalls[0].ops[0].value, [{ id: "gpt-a" }],
+    "可写目标：可解析集合只取目录文件（注册表里的 gpt-reg 不参与）");
+});
+
+test("ADR 0003：asar 只读目标——preview 标记 registry 通道，apply 走注册表注入（零写盘、settings 落 target、无需重启）", async () => {
   const inst = makeAsarInstall();
   const before = readFileSync(inst.catalogFile);
   const ctx = makeCtx({
@@ -812,47 +862,84 @@ test("ADR 0002：asar 只读目标——preview 暴露 catalogWritable=false，a
   }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
   const p = await call(handler(ctx, "/refresh/preview"), { method: "POST", body: { mode: "overlay" } });
   assert.equal(p.code, 200);
-  assert.equal(p.body.catalogWritable, false, "preview 携带 catalogWritable=false");
+  assert.equal(p.body.catalogWritable, false, "只读安装树");
+  assert.equal(p.body.catalogMode, "registry", "ADR 0003：非写盘落地通道");
+  assert.deepEqual(p.body.target, ["gpt-a", "gpt-b"]);
+  // 自证面：注入 + settings 写入后，路由必须真的端出 target（mock 只能显式给出）
+  ctx.script.served = p.body.target.map((id) => ({ id }));
   const a = await call(handler(ctx, "/refresh/apply"), { method: "POST", body: { mode: "overlay", digests: p.body.digests } });
-  assert.equal(a.code, 400);
-  assert.equal(a.body.error, "catalog-not-writable");
-  assert.equal(a.body.reason, "asar");
+  assert.equal(a.code, 200);
+  assert.equal(a.body.mode, "registry");
+  assert.equal(a.body.restartRequired, false, "注册表注入当次生效，无重启相位");
+  assert.deepEqual(a.body.injected, ["gpt-b"], "增量条目已注入进程内注册表");
   assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入");
-  assert.equal(existsSync(inst.stateFile), false, "journal 不落盘（write-ahead 之前拦截，杜绝 boot 重试写归档）");
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal, null, "无 write-ahead 相位");
+  assert.equal(after.activated, true);
+  assert.equal(after.restartState, null, "无需重启");
+  assert.deepEqual(after.appliedOverlay, overlayEntry(), "增量入 appliedOverlay（下次 boot 重放）");
+  assert.deepEqual(ctx.settings.mutateCalls.at(-1).ops[0].value, [{ id: "gpt-a" }, { id: "gpt-b" }], "settings 落 target");
 });
 
-test("ADR 0002：probe-failed（只读卷/ACL 形态，opts.writableProbe 注入）同样 400 快速失败", async () => {
+test("ADR 0003：只读目标但注册表面不可用（无 pi-ai 模块树）→ 400 registry-inject-failed，零落盘、绝不写 settings", async () => {
   const inst = makeInstall();
   const before = readFileSync(inst.catalogFile);
   const ctx = makeCtx({
     record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-a", "gpt-b"] } } },
   }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor(), writableProbe: () => false });
   const p = await call(handler(ctx, "/refresh/preview"), { method: "POST", body: { mode: "overlay" } });
+  assert.equal(p.code, 200);
   assert.equal(p.body.catalogWritable, false);
+  assert.equal(p.body.catalogMode, "registry", "只读目标一律标记 registry 通道");
   const a = await call(handler(ctx, "/refresh/apply"), { method: "POST", body: { mode: "overlay", digests: p.body.digests } });
   assert.equal(a.code, 400);
-  assert.equal(a.body.error, "catalog-not-writable");
-  assert.equal(a.body.reason, "probe-failed");
-  assert.deepEqual(readFileSync(inst.catalogFile), before);
-  assert.equal(existsSync(inst.stateFile), false);
+  assert.equal(a.body.error, "registry-inject-failed");
+  assert.equal(a.body.reason, "registry-modules-unavailable");
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入");
+  assert.equal(existsSync(inst.stateFile), false, "journal 不落盘");
+  assert.equal(ctx.settings.mutateCalls.length, 0, "注入失败绝不写 settings（不产假模型）");
 });
 
-test("ADR 0002：boot0 prepared 恢复遇只读目标——不重试写盘，journal 保留、lastError 可 grep", async () => {
+test("ADR 0003：注入成功但路由未端出 target → 回滚 settings 并 500 registry-not-effective", async () => {
+  const inst = makeAsarInstall();
+  const before = readFileSync(inst.catalogFile);
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-a", "gpt-b"] } } },
+    userLayer: baselineUserLayer(),
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  const p = await call(handler(ctx, "/refresh/preview"), { method: "POST", body: { mode: "overlay" } });
+  // ctx.script.served 保持空：注入与 settings 都发生了，但路由端不出来 → 必须回滚
+  const a = await call(handler(ctx, "/refresh/apply"), { method: "POST", body: { mode: "overlay", digests: p.body.digests } });
+  assert.equal(a.code, 500);
+  assert.equal(a.body.error, "registry-not-effective");
+  assert.equal(a.body.rolledBack, true, "回滚成功");
+  assert.deepEqual(ctx.settings.mutateCalls.at(-1).ops,
+    [{ op: "set", path: ["providers", "github-copilot", "models"], value: [{ id: "gpt-a" }] }],
+    "把 models 恢复成刷新前视图");
+  assert.deepEqual(readFileSync(inst.catalogFile), before);
+  assert.equal(existsSync(inst.stateFile), false, "失败不留状态");
+});
+
+test("ADR 0003：boot0 prepared 恢复遇只读目标——注册表注入即落地：journal 推进、零写盘、无重启标记", async () => {
   const inst = makeAsarInstall();
   const before = readFileSync(inst.catalogFile);
   const state = { ...freshState(), journal: makeJournal(inst, { baseline: BASELINE, against: "0.87.1" }) };
   writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
   const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
   await ctx.bootReady;
-  assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入（不再每 boot 撞 asar）");
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入（不碰只读归档）");
   const after = loadStateFile(inst.stateFile);
-  assert.equal(after.journal.phase, "prepared", "journal 保留：目标变可写后本恢复自动完成");
-  assert.match(after.lastError, /catalog-not-writable \(asar\)/);
+  assert.equal(after.journal, null, "注入落地 → journal 推进并在 boot2a 消费完成");
+  assert.deepEqual(after.appliedOverlay, overlayEntry(), "增量入 appliedOverlay");
+  assert.equal(after.lastError, null);
+  assert.equal(after.restartState, null, "注册表注入当次生效，不设重启标记");
   const status = await call(handler(ctx, "/status"));
   assert.equal(status.body.refresh.catalogWritable, false);
+  assert.equal(status.body.refresh.catalogMode, "registry");
+  assert.equal(status.body.refresh.registryInjected, 1, "已注入条目数可观测");
 });
 
-test("ADR 0002：boot1 自愈遇只读目标——推迟重放，不抛错、不设 restartState、不阻断挂载", async () => {
+test("ADR 0003：boot1 自愈遇只读目标——注入重放即完成，不写盘、无 restartState、overlay 保留", async () => {
   const inst = makeAsarInstall();
   const before = readFileSync(inst.catalogFile);
   const state = {
@@ -864,7 +951,34 @@ test("ADR 0002：boot1 自愈遇只读目标——推迟重放，不抛错、不
   await ctx.bootReady;
   assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入");
   const after = loadStateFile(inst.stateFile);
-  assert.match(after.lastError, /catalog-not-writable \(asar\)/);
+  assert.equal(after.lastError, null, "自愈完成（不再留 catalog-not-writable）");
   assert.equal(after.restartState, null, "未写盘不设 restart 标记");
-  assert.equal(after.activated, true, "激活态保留（自愈只是推迟）");
+  assert.equal(after.activated, true);
+  assert.deepEqual(after.appliedOverlay, overlayEntry(), "overlay 保留（幂等重放面）");
+});
+
+test("ADR 0002/0003：只读且注册表面不可用——boot0 不重试、journal 保留、lastError 可 grep", async () => {
+  const inst = makeInstall();
+  const before = readFileSync(inst.catalogFile);
+  const state = { ...freshState(), journal: makeJournal(inst, { baseline: BASELINE, against: "0.84.4" }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor(), writableProbe: () => false });
+  await ctx.bootReady;
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入");
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal.phase, "prepared", "journal 保留：注册表面恢复后本恢复自动完成");
+  assert.match(after.lastError, /registry-inject-failed \(registry-modules-unavailable\)/);
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.body.refresh.catalogWritable, false);
+});
+
+test("ADR 0003：登录同步把注册表里的条目也算作可解析（目录文件看不到它们）", async () => {
+  const inst = makeAsarInstall();
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-a", "gpt-reg", "gpt-nope"] } } },
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(ctx.settings.mutateCalls[0].ops[0].value, [{ id: "gpt-a" }, { id: "gpt-reg" }],
+    "可解析集合 = 目录文件 ∪ 进程内注册表；两者都没有的 gpt-nope 仍被排除");
 });

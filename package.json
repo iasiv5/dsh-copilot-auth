@@ -23,6 +23,7 @@
     "README.md",
     "LICENSE",
     "src/catalog.mjs",
+    "src/catalog-registry.mjs",
     "src/catalog-fetch.mjs",
     "src/copilot-models.mjs",
     "src/atomic-json.mjs",

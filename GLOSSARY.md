@@ -4,7 +4,7 @@
 
 | 术语 | 含义 |
 |---|---|
-| **协议注册表** | pi-ai 内置的模型清单，决定一个模型的协议能否被解析。快照之外的新模型无法写入路由模型目录（catalog 校验拒绝）。 |
+| **协议注册表** | pi-ai 内置的模型清单，决定一个模型的协议能否被解析。快照之外的新模型无法写入路由模型目录（catalog 校验拒绝）——除非把它补进注册表：可写安装树写目录文件，只读安装树注入进程内注册表（ADR 0003）。 |
 | **账号可用模型** | Copilot `/models` 接口实时返回的、当前账号实际可调用的模型集合。 |
 | **路由模型目录** | 用户 `settings.yaml` 中 `github-copilot` 路由下的 `models` 列表，即 DSH Models 页显示的内容。归用户所有。 |
 
@@ -20,6 +20,7 @@
 
 - **目录外 id 不可写**：github-copilot 是混合协议目录（3 种 wire 协议），无路由共享协议，目录外 id 在 settings 写入校验时即被拒绝。路由级 api 绕行会强制全路由单协议，淘汰。
 - **数据级目录补丁**：手动刷新时从 npm 拉取最新 pi-ai 的 `github-copilot.json` 与本机安装做数据级合并，pi-ai 代码版本不变。合并语义是**只增不更新**：补充本机从未见过的模型条目；上游对已有 id 的元数据修正（api 归属、contextWindow、compat 等）不会被同步——这是为「永不覆盖」付出的代价，UI 与文档措辞为「补充新模型目录条目」而非「刷新到最新目录」。
-- **两阶段生效**：pi-ai 在模块加载时读目录 JSON。写盘（含自愈重放）后的**同一 boot 禁止执行 settings 同步**，必须等下一个 boot；崩溃恢复靠持久 journal（写前日志），不靠进程内存布尔。
+- **两阶段生效（写盘通道）**：pi-ai 在模块加载时读目录 JSON。写盘（含自愈重放）后的**同一 boot 禁止执行 settings 同步**，必须等下一个 boot；崩溃恢复靠持久 journal（写前日志），不靠进程内存布尔。
+- **落地通道（landing channel）**：增量目录条目"落到运行时"的方式，按目标可写性二分——**写盘通道**（可写安装树：原子写 `github-copilot.json`，两阶段、需重启）与**注册表通道**（只读安装树：注入进程内 `MODELS[provider]`，当次生效、无需重启，ADR 0003）。注册表通道不写盘 ⇒ 无重启相位，`appliedOverlay` 仍是跨 boot 的幂等重放面。
 - **可用性适配的版本耦合**：现场拉取 `GET /models` 的凭证字段（`payload.access`/`enterpriseUrl`）、baseUrl 推导（token `proxy-ep`）、过滤语义（picker 严格 + 仅 individual 端点的 policy 回退）逐行对齐 pi-ai 0.84.4 内部实现，属**显式耦合**（显式版本耦合）；任何偏差或失败一律回退凭证缓存的 `availableModelIds`。
 - **供应链边界**：npm 拉取强制 `dist.integrity` 校验、超时与大小上限、tar 严格解析、条目 schema 校验（api 白名单、key==id、provider 归属）；tarball 仅允许 HTTPS，或与所配置 registry 同主机的企业镜像例外。

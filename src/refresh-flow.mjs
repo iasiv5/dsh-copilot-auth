@@ -6,7 +6,7 @@
 // POST preview）→ 成功进 confirming(staleNotice)；restartNeeded 可由 /status 水合。
 import { routes } from "./shared.mjs";
 
-export const initial = Object.freeze({ name: "idle", catalogWritable: null });
+export const initial = Object.freeze({ name: "idle", catalogWritable: null, catalogMode: null });
 
 // reduce(state, event) → [nextState, effect | null]
 // effect 为数据化指令：{type:"preview",mode} | {type:"apply",mode,digests} | {type:"status"}
@@ -25,12 +25,15 @@ export function reduce(state, event) {
         if (!event.status) return [state, null]; // status 拉取失败不硬失败
         if (refresh?.lastError === "state-corrupt") return [{ name: "failed", error: "state-corrupt" }, null];
         if (refresh?.pendingRestart === true) {
-          return [{ name: "restartNeeded", catalogWritable: refresh?.catalogWritable ?? null }, null];
+          return [{ name: "restartNeeded", catalogWritable: refresh?.catalogWritable ?? null, catalogMode: refresh?.catalogMode ?? null }, null];
         }
-        // 干净水合：catalogWritable 随 /status 落态（desktop asar 只读形态 → false，
-        // UI 置灰刷新入口）；旧宿主不携带该字段时保持现值不回退。
+        // 干净水合：catalogWritable / catalogMode 随 /status 落态。desktop asar 只读
+        // 形态下 catalogWritable=false 且 catalogMode="registry"（ADR 0003：刷新走
+        // 进程内目录注册表注入，入口保持可用且无需重启）；旧宿主不携带这两个字段时
+        // 保持现值不回退（不回退为"可写"，避免误导）。
         const writable = refresh && "catalogWritable" in refresh ? refresh.catalogWritable : state.catalogWritable ?? null;
-        return [{ ...state, catalogWritable: writable }, null];
+        const mode = refresh && "catalogMode" in refresh ? refresh.catalogMode : state.catalogMode ?? null;
+        return [{ ...state, catalogWritable: writable, catalogMode: mode }, null];
       }
       return [state, null];
     }
@@ -57,7 +60,13 @@ export function reduce(state, event) {
       return [state, null];
     }
     case "applying": {
-      if (event.type === "apply-ok") return [{ name: "restartNeeded" }, null];
+      // apply-ok 携带 restartRequired / mode（ADR 0003）：registry 通道当次生效，
+      // 不要求重启；file 通道仍是两阶段（下个 boot 同步 settings）。
+      if (event.type === "apply-ok") {
+        return event.restartRequired === false
+          ? [{ name: "applied", mode: event.mode ?? null, injected: event.injected ?? 0 }, null]
+          : [{ name: "restartNeeded", catalogMode: state.catalogMode ?? null }, null];
+      }
       if (event.type === "apply-stale") {
         // 409 preview-stale：以原 mode 重新 preview（保持 overlay 来源，R2-5）
         return [{ name: "previewing", mode: state.mode, stale: true }, { type: "preview", mode: state.mode }];
@@ -99,7 +108,12 @@ export async function runEffect(effect, fetchImpl) {
       const body = await res.json().catch(() => null);
       if (res.status === 409) return { type: "apply-stale" };
       return res.status === 200 && body?.ok
-        ? { type: "apply-ok" }
+        ? {
+            type: "apply-ok",
+            restartRequired: body.restartRequired !== false,
+            mode: body.mode ?? null,
+            injected: Array.isArray(body.injected) ? body.injected.length : 0,
+          }
         : { type: "apply-fail", error: body?.error ?? `HTTP ${res.status}` };
     } catch (err) {
       return { type: "apply-fail", error: String(err?.message ?? err) };

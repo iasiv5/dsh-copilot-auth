@@ -8,8 +8,9 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CREDENTIAL_KEY, emptyState, routes } from "./shared.mjs";
 import { readJson, writeJsonAtomic, createMutex } from "./atomic-json.mjs";
-import { mergeCatalog, diffModels, digest, findPiAiInstallation, classifyCatalogTarget } from "./catalog.mjs";
+import { mergeCatalog, diffModels, digest, findPiAiInstallation, classifyCatalogTarget, normalizeRemoteCatalog, catalogShapeKeys } from "./catalog.mjs";
 import { fetchLatestCatalog } from "./catalog-fetch.mjs";
+import { injectCatalogEntries, registryModelIds } from "./catalog-registry.mjs";
 import { fetchLiveAvailableModelIds } from "./copilot-models.mjs";
 import { loadState, saveState, freshState, createJournal, advanceJournal, restartMarker, setLastError, clearLastError } from "./state.mjs";
 
@@ -35,20 +36,28 @@ function findCatalogFile() {
   return null;
 }
 
-// 读取 pi-ai 内置目录的 github-copilot 模型 id → 协议映射。只读不改。
-// 定位/解析失败返回 null（调用方回退 listModels 交集，见下）。
-function readCatalogModelIds() {
+// 读取 github-copilot 的「可解析模型 id → 协议」映射。只读不改。
+// 两个来源的并集：① 安装树内的目录数据文件；② 进程内目录注册表（ADR 0003——desktop
+// 只读安装树下，刷新出来的增量条目只存在于注册表，目录文件里永远看不到）。两者都
+// 拿不到才返回 null（调用方回退 listModels 交集）。
+async function readCatalogModelIds(install, log) {
+  const byId = {};
   try {
-    const dataFile = findCatalogFile();
-    if (!dataFile) return null;
-    const data = JSON.parse(readFileSync(dataFile, "utf8"));
-    const byId = {};
-    for (const [api, section] of Object.entries(data)) {
-      for (const id of Object.keys(section ?? {})) byId[id] ??= api;
+    const dataFile = install?.catalogFile ?? findCatalogFile();
+    if (dataFile) {
+      const data = JSON.parse(readFileSync(dataFile, "utf8"));
+      for (const [api, section] of Object.entries(data)) {
+        for (const id of Object.keys(section ?? {})) byId[id] ??= api;
+      }
     }
-    return byId;
   } catch { /* 安装树结构变化时回退 */ }
-  return null;
+  try {
+    // 注册表面只在**只读安装树**（desktop asar）上才有意义：可写安装树下目录文件就是
+    // 运行时加载的副本，多读一次模块只是白白把 pi-ai 的模块图拉进本进程。
+    const ids = install && install.writable !== true ? await registryModelIds(install, log) : null;
+    if (ids) for (const id of ids) byId[id] ??= "registry";
+  } catch { /* 注册表不可用不阻断同步 */ }
+  return Object.keys(byId).length > 0 ? byId : null;
 }
 
 // 登录成功后，把账号可用模型写入用户 settings 的模型目录
@@ -78,7 +87,7 @@ function readConfiguredRoute(ctx) {
   }
 }
 
-async function syncAvailableModels(ctx) {
+async function syncAvailableModels(ctx, opts = {}) {
   const record = await ctx.credentials.readRecord(CREDENTIAL_KEY);
   const available = record?.payload?.availableModelIds;
   if (!Array.isArray(available) || available.length === 0) return;
@@ -88,7 +97,7 @@ async function syncAvailableModels(ctx) {
     && typeof route.modelOverrides === "object"
     && Object.keys(route.modelOverrides).length > 0;
   if (modelsConfigured || overridesConfigured) return;
-  const catalog = readCatalogModelIds();
+  const catalog = await readCatalogModelIds(safeInstall(opts), (m) => ctx.logger?.info?.(m));
   let ids;
   if (catalog) {
     ids = available.filter((id) => catalog[id] !== undefined);
@@ -184,6 +193,15 @@ function resolveInstall(opts) {
   return { ...install, ...classifyCatalogTarget(install.catalogFile, opts.writableProbe) };
 }
 
+// 定位失败不抛（boot/同步/settings 都必须能在安装树异常时降级）。
+function safeInstall(opts = {}) {
+  try {
+    return resolveInstall(opts);
+  } catch {
+    return null;
+  }
+}
+
 function readLocalCatalog(opts) {
   const install = resolveInstall(opts);
   const bytes = readFileSync(install.catalogFile);
@@ -210,12 +228,16 @@ async function resolveAvailable(ctx, fetchImpl) {
 
 // R3-3 严格分支：仅 mode==="overlay" 读内置覆盖层；normal npm 失败只回
 // catalogSource:"local"（绝不隐式读 overlay）；未知 mode → 400。
-async function resolveCatalogSource(opts, mode, fetchImpl) {
+async function resolveCatalogSource(opts, mode, fetchImpl, allowedKeys) {
   if (mode === "overlay") {
-    const catalog = readJson(opts.overlayFile ?? defaultOverlayFile());
-    if (catalog === undefined) throw new Error("bundled overlay file missing");
+    const raw = readJson(opts.overlayFile ?? defaultOverlayFile());
+    if (raw === undefined) throw new Error("bundled overlay file missing");
+    // 形状规范化（ADR 0003）：pi-ai ≥0.99.0 的目录用 `chat:<id>` 键，必须规范化回
+    // 裸 id + 本机字段集合，合并/校验/digest 才与 0.87.x 世代同语义。
+    const normalized = normalizeRemoteCatalog(raw, { allowedKeys });
     return {
-      catalog,
+      catalog: normalized.catalog,
+      normalized: { renamed: normalized.renamed, skipped: normalized.skipped },
       catalogSource: "overlay",
       catalogError: null,
       provenance: { kind: "overlay", piAiVersion: OVERLAY_SOURCE_VERSION, integrity: null },
@@ -224,8 +246,10 @@ async function resolveCatalogSource(opts, mode, fetchImpl) {
   if (mode !== undefined && mode !== "latest") throw new InvalidModeError(String(mode));
   try {
     const r = await fetchLatestCatalog({ fetchImpl });
+    const normalized = normalizeRemoteCatalog(r.catalog, { allowedKeys });
     return {
-      catalog: r.catalog,
+      catalog: normalized.catalog,
+      normalized: { renamed: normalized.renamed, skipped: normalized.skipped },
       catalogSource: "latest",
       catalogError: null,
       provenance: { kind: "latest", piAiVersion: r.piAiVersion, integrity: r.integrity },
@@ -233,6 +257,7 @@ async function resolveCatalogSource(opts, mode, fetchImpl) {
   } catch (error) {
     return {
       catalog: readLocalCatalog(opts).catalog,
+      normalized: null,
       catalogSource: "local",
       catalogError: String(error?.message ?? error),
       provenance: { kind: "local" },
@@ -304,6 +329,32 @@ async function bootRefresh(ctx, opts) {
     let bootPatched = false;
     const readDiskCatalog = () => JSON.parse(readFileSync(install.catalogFile, "utf8"));
     const diskIds = (disk) => new Set(Object.values(disk).flatMap((s) => Object.keys(s ?? {})));
+    const log = (m) => ctx.logger?.info?.(m);
+    // 测试注入钩子：opts.injectRegistry / opts.registryIds（生产恒用真实实现）。
+    const injectRegistry = opts.injectRegistry ?? injectCatalogEntries;
+    const readRegistryIds = opts.registryIds ?? registryModelIds;
+    // 落地一次目录增量：可写安装树走原子写盘（ADR 0001）；只读安装树（desktop asar）
+    // 走进程内目录注册表注入（ADR 0003）。返回 { ok, wrote, mode, reason }，绝不抛。
+    const landIncrement = async (overlay, merged) => {
+      if (install.writable) {
+        writeJsonAtomic(install.catalogFile, merged.merged);
+        return { ok: true, wrote: true, mode: "file", reason: null };
+      }
+      const r = await injectRegistry(install, overlay, {
+        log,
+        allowedKeys: catalogShapeKeys(readDiskCatalog()),
+      });
+      return { ok: r.ok, wrote: false, mode: "registry", reason: r.reason, detail: r };
+    };
+    // 运行时实际可解析的模型 id：目录文件 ∪ 进程内注册表（ADR 0003——注入的条目
+    // 不在文件里，任何"目录可解析"判定都必须走这一面）。
+    const servedIds = async () => {
+      const ids = diskIds(readDiskCatalog());
+      // 同 readCatalogModelIds：只有只读安装树才需要并注册表面（可写树下两者同源）。
+      const reg = install.writable === true ? null : await readRegistryIds(install, log);
+      if (reg) for (const id of reg) ids.add(id);
+      return ids;
+    };
 
     // boot 0：journal=prepared 崩溃恢复（先于激活门，但先过兼容 gate，R3-1）
     if (state.journal?.phase === "prepared") {
@@ -314,15 +365,16 @@ async function bootRefresh(ctx, opts) {
       }
       const replay = mergeCatalog(readDiskCatalog(), state.journal.pendingOverlay);
       if (replay.added.length > 0) {
-        // 可写性门禁（ADR 0002）：不可写目标不重试写盘——journal 原样保留，安装将来
-        // 变可写（如桌面版改为解包 pi-ai）后本恢复自动完成。零写入、可 grep 的 lastError。
-        if (!install.writable) {
-          state = setLastError(state, `catalog-not-writable (${install.unwritableReason}): pi-ai catalog is read-only; prepared journal kept, refresh will complete automatically once the target becomes writable`);
+        const landed = await landIncrement(state.journal.pendingOverlay, replay);
+        if (!landed.ok) {
+          // 落地失败（不可写且注册表注入失败）：journal 原样保留、零写入、可 grep 的
+          // lastError，下次 boot 重试；安装树将来变可写后本恢复自动完成。
+          const why = landed.mode === "file" ? `catalog-not-writable (${install.unwritableReason})` : `registry-inject-failed (${landed.reason})`;
+          state = setLastError(state, `${why}: pi-ai catalog is not landable; prepared journal kept`);
           saveState(stateFile, state);
           return;
         }
-        writeJsonAtomic(install.catalogFile, replay.merged);
-        bootPatched = true;
+        bootPatched = landed.wrote;
       }
       state.appliedOverlay = mergeCatalog(state.appliedOverlay, state.journal.pendingOverlay).merged;
       state.appliedProvenance = {
@@ -332,7 +384,9 @@ async function bootRefresh(ctx, opts) {
         catalogSchemaVersion: 1,
       };
       state.activated = true;
-      state.restartState = restartMarker("refresh", digest(state.appliedOverlay));
+      // file 通道才需要重启标记（下个 boot 由 2a 把 settings 镜像到 target）；
+      // 注册表注入当次生效，boot2a 在本 boot 就会同步 settings（ADR 0003）。
+      if (install.writable) state.restartState = restartMarker("refresh", digest(state.appliedOverlay));
       state.journal = advanceJournal(state.journal);
       state = clearLastError(state);
       saveState(stateFile, state);
@@ -349,21 +403,23 @@ async function bootRefresh(ctx, opts) {
         } else if (install.version === baseline) {
           const replay = mergeCatalog(readDiskCatalog(), state.appliedOverlay);
           if (replay.added.length > 0) {
-            // 可写性门禁（ADR 0002）：自愈同理不重试写盘——appliedOverlay 保留，
-            // 目标可写后下一 boot 重放；不抛错、不阻断启动序列。
-            if (!install.writable) {
-              state = setLastError(state, `catalog-not-writable (${install.unwritableReason}): pi-ai catalog is read-only; self-heal deferred, overlay entries stay pending`);
+            const landed = await landIncrement(state.appliedOverlay, replay);
+            if (!landed.ok) {
+              // 自愈失败不抛错、不阻断启动序列：appliedOverlay 保留，下次 boot 重放。
+              const why = landed.mode === "file" ? `catalog-not-writable (${install.unwritableReason})` : `registry-inject-failed (${landed.reason})`;
+              state = setLastError(state, `${why}: self-heal deferred, overlay entries stay pending`);
               saveState(stateFile, state);
             } else {
-              writeJsonAtomic(install.catalogFile, replay.merged); // 原子重放
-              bootPatched = true;
-              state.restartState = restartMarker("self-heal", digest(state.appliedOverlay));
+              bootPatched = landed.wrote;
+              // 注册表注入是进程内的、当次 boot 即生效，不需要重启标记（ADR 0003）。
+              if (landed.wrote) state.restartState = restartMarker("self-heal", digest(state.appliedOverlay));
               state = clearLastError(state);
               saveState(stateFile, state);
             }
           }
         } else {
-          const missing = overlayIds.filter((id) => !diskIds(readDiskCatalog()).has(id));
+          const served = await servedIds();
+          const missing = overlayIds.filter((id) => !served.has(id));
           if (missing.length > 0) {
             // 跨版本有缺失：上报 self-heal-incompatible，不改安装树
             state = setLastError(state, `self-heal-incompatible: pi-ai ${install.version} != baseline ${baseline}, missing ${missing.join(",")}`);
@@ -384,7 +440,7 @@ async function bootRefresh(ctx, opts) {
         try {
           if (!install) throw new Error("pi-ai installation not found");
           // 语义前置（Y2-3）：targetIds 全部可由当前目录解析；whole-file digest 仅诊断
-          const ids = diskIds(readDiskCatalog());
+          const ids = await servedIds();
           const unresolvable = j.targetIds.filter((id) => !ids.has(id));
           if (unresolvable.length > 0) throw new Error(`target-unresolvable: ${unresolvable.join(",")}`);
           const desc = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
@@ -418,7 +474,7 @@ async function bootRefresh(ctx, opts) {
       // 2b. restartState 非空且 expected entries 已在目录 → 仅清 restartState
       // （不携带 settings 意图：单独存在时不得触碰 describe/mutate）
       if (state.restartState && install) {
-        const ids = diskIds(readDiskCatalog());
+        const ids = await servedIds();
         if (overlayEntryIds(state.appliedOverlay).every((id) => ids.has(id))) {
           state.restartState = null;
           state = clearLastError(state);
@@ -453,7 +509,7 @@ async function computeRefreshInputs(ctx, opts, mode) {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch?.bind(globalThis);
   const { ids, source } = await resolveAvailable(ctx, fetchImpl);
   const local = readLocalCatalog(opts);
-  const resolved = await resolveCatalogSource(opts, mode, fetchImpl);
+  const resolved = await resolveCatalogSource(opts, mode, fetchImpl, catalogShapeKeys(local.catalog));
   const merged = mergeCatalog(local.catalog, resolved.catalog);
   const catalogIds = new Set(Object.values(merged.merged).flatMap((s) => Object.keys(s ?? {})));
   const view = rawSettingsView(ctx);
@@ -479,6 +535,40 @@ async function computeRefreshInputs(ctx, opts, mode) {
   return { view, ids, source, local, resolved, merged, diff, customizationReset, digests };
 }
 
+// 端到端自证（ADR 0003）：注入 + settings 写入后，路由必须真的把 target 端出来。
+// settings→快照重建是异步的，故带短重试。返回 { ok, missing, served }。
+async function waitForServedModels(ctx, targetIds, { attempts = 6, delayMs = 150 } = {}) {
+  const want = [...new Set(targetIds)];
+  let served = new Set();
+  for (let i = 0; i < attempts; i++) {
+    try {
+      served = new Set((await ctx.llm.listModels("github-copilot")).map((m) => m?.id).filter(Boolean));
+    } catch (err) {
+      if (i === attempts - 1) return { ok: false, missing: want, served: [...served], error: String(err?.message ?? err) };
+    }
+    const missing = want.filter((id) => !served.has(id));
+    if (missing.length === 0) return { ok: true, missing: [], served: [...served] };
+    if (i < attempts - 1) await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return { ok: false, missing: want.filter((id) => !served.has(id)), served: [...served] };
+}
+
+// 自证失败时的 best-effort 回滚：把用户 settings 的 models 恢复成刷新前的视图。
+// 回滚本身失败不掩盖原错误——调用方以结构化错误（rolledBack:false）上报。
+async function rollbackSettings(ctx, previous) {
+  try {
+    const desc = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
+    if (!desc) return false;
+    const ops = previous?.modelsPresent
+      ? [{ op: "set", path: ["providers", "github-copilot", "models"], value: previous.models }]
+      : [{ op: "unset", path: ["providers", "github-copilot", "models"] }];
+    await ctx.settings.mutate("llm-pi-ai", ops, desc.revision);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function apply(ctx, opts = {}) {
   const r = routes();
   let attempt = emptyState();
@@ -496,7 +586,7 @@ export function apply(ctx, opts = {}) {
   // 模型目录同步只在登录成功后执行（2026-09-05 对齐结论：挂载不再同步）。
   // 插件启动/重启绝不触碰用户 settings，用户精简过的目录不会被动重置。
   // 失败不静默：错误经 /status 的 syncError 字段暴露，便于诊断。
-  const sync = () => syncAvailableModels(ctx).then(() => { lastSyncError = undefined; }).catch((err) => {
+  const sync = () => syncAvailableModels(ctx, opts).then(() => { lastSyncError = undefined; }).catch((err) => {
     lastSyncError = String(err?.message ?? err);
     ctx.logger?.warn?.("copilot-auth: model sync failed: %s", lastSyncError);
   });
@@ -596,6 +686,10 @@ export function apply(ctx, opts = {}) {
         catalogDigest,
         catalogFile: install?.catalogFile ?? null,
         catalogWritable: install ? install.writable === true : null,
+        // 落地通道（ADR 0003）：file = 可写安装树走目录补丁；registry = 只读安装树
+        // （desktop asar）走进程内目录注册表注入。registryInjected = 已注入条目数。
+        catalogMode: install ? (install.writable === true ? "file" : "registry") : null,
+        registryInjected: overlayEntryIds(state.appliedOverlay).length,
       };
       json(res, 200, { configured, syncError: lastSyncError, refresh });
     },
@@ -646,6 +740,8 @@ export function apply(ctx, opts = {}) {
           catalogSource: inputs.resolved.catalogSource,
           catalogError: inputs.resolved.catalogError,
           catalogWritable: inputs.local.writable,
+          catalogMode: inputs.local.writable ? "file" : "registry",
+          catalogNormalized: inputs.resolved.normalized,
           skipped: inputs.merged.skipped,
           added: inputs.diff.added,
           removed: inputs.diff.removed,
@@ -696,15 +792,69 @@ export function apply(ctx, opts = {}) {
           }
           // digest 全部一致后才解析版本（写入失败点上移，500 不留 journal）
           const install = resolveInstall(opts);
-          // 可写性门禁（ADR 0002）：不可写目标在 write-ahead 之前快速失败——绝不留
-          // prepared journal（desktop asar 形态下那会让每个 boot 都重试写归档）。
+          const stateFile = opts.stateFile ?? defaultStateFile();
           if (!install.writable) {
+            // 只读安装树（desktop asar）：ADR 0002 的写盘门禁之外再开一条**不写盘**的
+            // 落地通道——进程内目录注册表注入（ADR 0003）。注入成功才写 settings，
+            // 再以 listModels 端到端自证；自证失败回滚 settings，绝不产出
+            // "能选中但发不出去"的假模型。
+            const injectRegistry = opts.injectRegistry ?? injectCatalogEntries;
+            const injected = await injectRegistry(install, inputs.merged.addedOverlay, {
+              log: (m) => ctx.logger?.info?.(m),
+              allowedKeys: catalogShapeKeys(inputs.local.catalog),
+            });
+            if (!injected.ok) {
+              return {
+                code: 400,
+                payload: {
+                  ok: false,
+                  error: "registry-inject-failed",
+                  reason: injected.reason,
+                  missing: injected.missing,
+                  rejected: injected.rejected,
+                  catalogFile: install.catalogFile,
+                },
+              };
+            }
+            const desc = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");
+            if (!desc) {
+              return { code: 500, payload: { ok: false, error: "settings namespace llm-pi-ai unavailable" } };
+            }
+            await ctx.settings.mutate("llm-pi-ai", [
+              { op: "set", path: ["providers", "github-copilot", "models"], value: inputs.diff.target.map((id) => ({ id })) },
+            ], desc.revision);
+            const served = await waitForServedModels(ctx, inputs.diff.target);
+            if (!served.ok) {
+              const rolledBack = await rollbackSettings(ctx, inputs.view);
+              return {
+                code: 500,
+                payload: { ok: false, error: "registry-not-effective", missing: served.missing, rolledBack },
+              };
+            }
+            let state = loadState(stateFile);
+            state.appliedOverlay = mergeCatalog(state.appliedOverlay, inputs.merged.addedOverlay).merged;
+            state.appliedProvenance = {
+              sourcePiAiVersion: inputs.resolved.provenance.piAiVersion ?? null,
+              integrity: inputs.resolved.provenance.integrity ?? null,
+              appliedAgainstPiAiVersion: install.version,
+              catalogSchemaVersion: 1,
+            };
+            state.activated = true;
+            state.journal = null; // 注册表注入当次生效，无写盘、无重启相位
+            state = clearLastError(state);
+            saveState(stateFile, state);
             return {
-              code: 400,
-              payload: { ok: false, error: "catalog-not-writable", reason: install.unwritableReason, catalogFile: install.catalogFile },
+              code: 200,
+              payload: {
+                ok: true,
+                restartRequired: false,
+                mode: "registry",
+                registryVia: injected.via,
+                injected: [...injected.injected, ...injected.present],
+                target: inputs.diff.target.length,
+              },
             };
           }
-          const stateFile = opts.stateFile ?? defaultStateFile();
           const patchedBytes = Buffer.from(JSON.stringify(inputs.merged.merged, null, 2) + "\n", "utf8");
           let state = loadState(stateFile);
           state.journal = createJournal({
