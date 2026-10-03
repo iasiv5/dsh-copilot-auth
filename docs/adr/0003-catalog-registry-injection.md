@@ -101,4 +101,17 @@ ADR 0001 的数据级目录补丁要求把合并后的目录写回 pi-ai 的
 - 探针 A3（同进程）：`MODELS["github-copilot"] === GITHUB_COPILOT_MODELS` = true、
   两者均未冻结；注入 pi-ai 1.0.0 的 `gpt-6.1-sol` 条目后 `getBuiltinModels()` 32 → 33
   立即可见，且其描述符与 0.87.1 条目字段集**只差一个 `type:"chat"`**。
-- 单元/集成：本机 136/136 通过（含 22 条新增）。
+- 单元/集成：本机 136/136 通过（含 22 条新增）；CI 三平台矩阵（ubuntu/windows/macos）全绿。
+- **v1.2.5 装机实测（desktop profile，只读 app.asar）**：`/status` →
+  `catalogMode:"registry"`、`catalogWritable:false`、`registryInjected:2`、`lastError:null`；
+  apply 后 `appliedOverlay` 含 `gpt-6.1-sol`（openai-responses）与 `claude-sonnet-5.5`
+  （anthropic-messages），`appliedProvenance.sourcePiAiVersion:"1.0.0"` 对
+  `appliedAgainstPiAiVersion:"0.87.1"`；preview 的 `catalogNormalized.renamed=34`
+  （远端 1.0.0 目录的 `chat:` 键全部被规范化）。
+- **端到端真实请求验证**：同日 17:05:53 会话（`session-82369130-…`）以
+  `provider:"github-copilot" / model:"gpt-6.1-sol"` 提问「你是什么模型」，收到回答
+  「我是 **gpt-6.1-sol**，当前通过 **DeepSeek Harness** 运行的 AI 编程助手。」；
+  会话元数据 `contextWindow: 1050000` 与注入条目的 `contextWindow` 完全一致
+  （打包目录 0.87.1 根本不存在该 id，任何回退路径都不可能产生这个数值），计费记于
+  `github-copilot/gpt-6.1-sol`（1 次请求 / 12924 tokens）⇒ 注入条目确实被宿主路由
+  加载并完成了真实推理调用，而官方安装树**一字未改**。
