@@ -2,7 +2,12 @@ name: ci
 on: [push, pull_request]
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 三平台矩阵（ADR 0002）：可写性门禁与 fsyncDirectory 平台分支都依赖平台行为
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

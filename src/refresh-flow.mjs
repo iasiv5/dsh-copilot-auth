@@ -6,7 +6,7 @@
 // POST preview）→ 成功进 confirming(staleNotice)；restartNeeded 可由 /status 水合。
 import { routes } from "./shared.mjs";
 
-export const initial = Object.freeze({ name: "idle" });
+export const initial = Object.freeze({ name: "idle", catalogWritable: null });
 
 // reduce(state, event) → [nextState, effect | null]
 // effect 为数据化指令：{type:"preview",mode} | {type:"apply",mode,digests} | {type:"status"}
@@ -24,8 +24,13 @@ export function reduce(state, event) {
         const refresh = event.status?.refresh;
         if (!event.status) return [state, null]; // status 拉取失败不硬失败
         if (refresh?.lastError === "state-corrupt") return [{ name: "failed", error: "state-corrupt" }, null];
-        if (refresh?.pendingRestart === true) return [{ name: "restartNeeded" }, null];
-        return state.name === "idle" ? [state, null] : [state, null];
+        if (refresh?.pendingRestart === true) {
+          return [{ name: "restartNeeded", catalogWritable: refresh?.catalogWritable ?? null }, null];
+        }
+        // 干净水合：catalogWritable 随 /status 落态（desktop asar 只读形态 → false，
+        // UI 置灰刷新入口）；旧宿主不携带该字段时保持现值不回退。
+        const writable = refresh && "catalogWritable" in refresh ? refresh.catalogWritable : state.catalogWritable ?? null;
+        return [{ ...state, catalogWritable: writable }, null];
       }
       return [state, null];
     }

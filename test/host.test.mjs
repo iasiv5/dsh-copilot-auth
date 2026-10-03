@@ -783,4 +783,88 @@ test("/status.refresh 扩展字段：activated/pendingRestart/phase/piAiVersion/
   assert.equal(r.catalogFile, inst.catalogFile);
   const expectedDigest = createHash("sha256").update(readFileSync(inst.catalogFile)).digest("hex");
   assert.equal(r.catalogDigest, expectedDigest, "catalogDigest 绑定实际加载副本（R4-5）");
+  assert.equal(r.catalogWritable, true, "真实目录 → 可写（ADR 0002）");
+});
+
+// ==================== 可写性门禁（ADR 0002：desktop asar 只读目标） ====================
+
+// 与 makeInstall 同构，但安装根挂在名字以 .asar 结尾的目录下（三平台都能创建这种目录名，
+// isAsarPath 按段尾匹配）——模拟 dsh-desktop 的 app.asar 只读归档形态，无需真实 Electron：
+// 生产报错即 `ENOENT: ...app.asar\dsh\node_modules\@earendil-works\pi-ai\...tmp-<uuid> not found in ...app.asar`。
+function makeAsarInstall() {
+  const dir = mkdtempSync(join(tmpdir(), "host-asar-"));
+  const root = join(dir, "app.asar", "dsh", "node_modules", "@earendil-works", "pi-ai");
+  mkdirSync(join(root, "dist", "providers", "data"), { recursive: true });
+  const catalogFile = join(root, "dist", "providers", "data", "github-copilot.json");
+  writeFileSync(catalogFile, FIXTURE_0844);
+  const packageJsonFile = join(root, "package.json");
+  writeFileSync(packageJsonFile, JSON.stringify({ name: "@earendil-works/pi-ai", version: "0.87.1" }));
+  const overlayFile = join(dir, "overlay.json");
+  writeFileSync(overlayFile, JSON.stringify(OVERLAY, null, 2) + "\n");
+  return { dir, root, catalogFile, packageJsonFile, stateFile: join(dir, "state.json"), overlayFile };
+}
+
+test("ADR 0002：asar 只读目标——preview 暴露 catalogWritable=false，apply 400 在 write-ahead 之前拦截，零落盘", async () => {
+  const inst = makeAsarInstall();
+  const before = readFileSync(inst.catalogFile);
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-a", "gpt-b"] } } },
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  const p = await call(handler(ctx, "/refresh/preview"), { method: "POST", body: { mode: "overlay" } });
+  assert.equal(p.code, 200);
+  assert.equal(p.body.catalogWritable, false, "preview 携带 catalogWritable=false");
+  const a = await call(handler(ctx, "/refresh/apply"), { method: "POST", body: { mode: "overlay", digests: p.body.digests } });
+  assert.equal(a.code, 400);
+  assert.equal(a.body.error, "catalog-not-writable");
+  assert.equal(a.body.reason, "asar");
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入");
+  assert.equal(existsSync(inst.stateFile), false, "journal 不落盘（write-ahead 之前拦截，杜绝 boot 重试写归档）");
+});
+
+test("ADR 0002：probe-failed（只读卷/ACL 形态，opts.writableProbe 注入）同样 400 快速失败", async () => {
+  const inst = makeInstall();
+  const before = readFileSync(inst.catalogFile);
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-a", "gpt-b"] } } },
+  }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor(), writableProbe: () => false });
+  const p = await call(handler(ctx, "/refresh/preview"), { method: "POST", body: { mode: "overlay" } });
+  assert.equal(p.body.catalogWritable, false);
+  const a = await call(handler(ctx, "/refresh/apply"), { method: "POST", body: { mode: "overlay", digests: p.body.digests } });
+  assert.equal(a.code, 400);
+  assert.equal(a.body.error, "catalog-not-writable");
+  assert.equal(a.body.reason, "probe-failed");
+  assert.deepEqual(readFileSync(inst.catalogFile), before);
+  assert.equal(existsSync(inst.stateFile), false);
+});
+
+test("ADR 0002：boot0 prepared 恢复遇只读目标——不重试写盘，journal 保留、lastError 可 grep", async () => {
+  const inst = makeAsarInstall();
+  const before = readFileSync(inst.catalogFile);
+  const state = { ...freshState(), journal: makeJournal(inst, { baseline: BASELINE, against: "0.87.1" }) };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入（不再每 boot 撞 asar）");
+  const after = loadStateFile(inst.stateFile);
+  assert.equal(after.journal.phase, "prepared", "journal 保留：目标变可写后本恢复自动完成");
+  assert.match(after.lastError, /catalog-not-writable \(asar\)/);
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.body.refresh.catalogWritable, false);
+});
+
+test("ADR 0002：boot1 自愈遇只读目标——推迟重放，不抛错、不设 restartState、不阻断挂载", async () => {
+  const inst = makeAsarInstall();
+  const before = readFileSync(inst.catalogFile);
+  const state = {
+    ...freshState(), activated: true, appliedOverlay: overlayEntry(),
+    appliedProvenance: { ...PROVENANCE_0844, appliedAgainstPiAiVersion: "0.87.1" },
+  };
+  writeFileSync(inst.stateFile, JSON.stringify(state, null, 2) + "\n");
+  const ctx = makeCtx({ userLayer: baselineUserLayer() }, { catalogFile: inst.catalogFile, stateFile: inst.stateFile, overlayFile: inst.overlayFile, fetchImpl: fetchImplFor() });
+  await ctx.bootReady;
+  assert.deepEqual(readFileSync(inst.catalogFile), before, "目录零写入");
+  const after = loadStateFile(inst.stateFile);
+  assert.match(after.lastError, /catalog-not-writable \(asar\)/);
+  assert.equal(after.restartState, null, "未写盘不设 restart 标记");
+  assert.equal(after.activated, true, "激活态保留（自愈只是推迟）");
 });

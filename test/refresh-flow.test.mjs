@@ -125,6 +125,16 @@ test("reducer：/status 水合——pendingRestart → restartNeeded；state-cor
   assert.equal(s.name, "idle");
 });
 
+test("reducer：水合携带 catalogWritable——false 落态供 UI 置灰；旧宿主缺字段不回退", () => {
+  let [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: false, lastError: null, catalogWritable: false } } });
+  assert.equal(s.catalogWritable, false, "desktop asar 形态 → false 落态");
+  [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: true, catalogWritable: false } } });
+  assert.equal(s.name, "restartNeeded");
+  assert.equal(s.catalogWritable, false, "restartNeeded 态同样携带");
+  [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: false, lastError: null } } });
+  assert.equal(s.catalogWritable, null, "旧宿主不带字段 → 保持现值不误置灰");
+});
+
 // ---------- effect runner 接线（Y3-3） ----------
 test("runner：latest 409 后以原 mode 重 preview 恰好一次，不重发 apply", async () => {
   const { fetchImpl, calls } = mockFetch({

@@ -7,7 +7,7 @@ import { gzipSync } from "node:zlib";
 import { tgz, tar } from "./helpers.mjs";
 import {
   SUPPORTED_APIS, extractTgzEntry, validateCatalog, mergeCatalog,
-  diffModels, digest, findPiAiInstallation,
+  diffModels, digest, findPiAiInstallation, isAsarPath, probeWritable, classifyCatalogTarget,
 } from "../src/catalog.mjs";
 
 const ENTRY_PATH = "package/dist/providers/data/github-copilot.json";
@@ -148,4 +148,30 @@ test("findPiAiInstallation：catalogFile/packageJsonFile/version 同根解析", 
   // 不存在 → null
   const empty = mkdtempSync(join(tmpdir(), "piai-empty-"));
   assert.equal(findPiAiInstallation({ startPath: empty }), null);
+});
+
+// ==================== 安装目标可写性分类（ADR 0002：desktop asar 只读目标） ====================
+
+test("isAsarPath：段尾 .asar 判定（大小写不敏感，/ 与 \\ 都认），.asar.unpacked 不误判", () => {
+  assert.equal(isAsarPath(String.raw`C:\Users\x\AppData\Local\Programs\DeepSeek Harness\resources\app.asar\dsh\node_modules\@earendil-works\pi-ai\dist\providers\data\github-copilot.json`), true, "win 路径（实机报错形态）");
+  assert.equal(isAsarPath("/opt/dsh/resources/app.asar/dsh/node_modules/@earendil-works/pi-ai/dist/providers/data/github-copilot.json"), true, "posix 路径");
+  assert.equal(isAsarPath("/opt/resources/APP.ASAR/x.json"), true, "大小写不敏感");
+  assert.equal(isAsarPath("/opt/resources/app.asar"), true, "整段即归档");
+  assert.equal(isAsarPath(String.raw`D:\data\app.asar.unpacked\dsh\x.json`), false, ".asar.unpacked 以 unpacked 结尾，不匹配");
+  assert.equal(isAsarPath("/opt/dsh/node_modules/@earendil-works/pi-ai/dist/providers/data/github-copilot.json"), false, "普通磁盘路径");
+  assert.equal(isAsarPath(""), false);
+  assert.equal(isAsarPath(undefined), false);
+});
+
+test("probeWritable：真实目录 true，不存在目录 false", () => {
+  assert.equal(probeWritable(mkdtempSync(join(tmpdir(), "probe-"))), true);
+  assert.equal(probeWritable(join(tmpdir(), "probe-not-exist")), false);
+});
+
+test("classifyCatalogTarget：asar 短路不触盘；普通目录经探测；probe 注入钩子生效", () => {
+  const asar = classifyCatalogTarget(String.raw`C:\x\app.asar\dsh\node_modules\@earendil-works\pi-ai\dist\providers\data\github-copilot.json`);
+  assert.deepEqual(asar, { writable: false, unwritableReason: "asar" });
+  const real = join(mkdtempSync(join(tmpdir(), "cls-")), "github-copilot.json");
+  assert.deepEqual(classifyCatalogTarget(real), { writable: true, unwritableReason: null });
+  assert.deepEqual(classifyCatalogTarget(real, () => false), { writable: false, unwritableReason: "probe-failed" }, "probe 注入（只读卷/ACL 形态）");
 });

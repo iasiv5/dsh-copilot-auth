@@ -81,6 +81,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 - **数据源与回退**：账号可用模型现场拉取（失败回退凭证缓存）；目录数据从 npm 拉取最新 pi-ai tarball（强制 `dist.integrity` 校验、超时与大小上限、tar 严格解析），失败时可改用内置覆盖层（0.85.1 收割，integrity `sha512-+VgVIJDkDO2efYJKEEqvPTH4zmnIaXdAppGbO+vKFA9qy5PdhFiAenuFAkU+oiCSfOC4dMHDyrjdQeL4ZoC5CQ==`）出 diff。
 - **只增不更新**：合并只补充本机从未见过的模型条目；上游对已有 id 的元数据修正（api 归属、contextWindow 等）不会同步——这是「永不覆盖」语义的代价（ADR 0001）。
 - **digest 绑定**：preview 与 apply 之间以输入 digest（settings 完整配置 / 可用模型 / 本地目录 / 目录来源）绑定，任何漂移即 409 并要求重新预览确认。
+- **可写性门禁（v1.2.4 起，ADR 0002）**：dsh-desktop（Electron）把整个运行时树打包进只读的 `resources/app.asar`，pi-ai 是其中唯一副本——读一切正常、写必被拒。插件在写盘前对目标做可写性分类（asar 路径识别 + 探针文件实测）：不可写时 preview/`/status` 暴露 `catalogWritable:false`、UI 置灰刷新入口并给出解释文案，apply 在 write-ahead **之前**以 400 `catalog-not-writable` 结构化快速失败（绝不留下 prepared journal）；boot 序列遇到只读目标同样不重试写盘，journal/overlay 原样保留，目标变可写（如桌面版改为解包 pi-ai）后恢复/自愈自动完成。Web/服务部署形态（pi-ai 在真实磁盘）行为不变。
 
 ## 工作原理
 
@@ -95,7 +96,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 
 ```bash
 npm install
-npm test        # node:test：patch 结构 + host/目录/状态机/启动序列共 107 条
+npm test        # node:test：patch 结构 + host/目录/状态机/启动序列/可写性门禁共 114 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
 npm run build   # esbuild 打包 client 到 lib/client.js（__ModuleLoader__ 信封）
 npm pack --dry-run
 ```
@@ -125,6 +126,7 @@ npm pack --dry-run
 - 模型目录只在「尚不存在」时由登录成功兜底填充一次，填充后归用户所有：账号新增的模型不会自动出现——用 GHC 设置页的「**刷新可用模型目录**」同步（见上节），或在 Models 页手动添加
 - 模型目录只写入 pi-ai 内置目录已描述的模型：目录快照外的新模型需先经「刷新可用模型目录」补入目录条目（数据级补丁，pi-ai 版本不变）才会出现在可选列表
 - DSH 升级后自愈仅在 pi-ai 基线版本不变（0.84.4）时重放；跨版本且条目未原生存在时上报 `self-heal-incompatible`，不修改安装树（重新执行一次手动刷新即可在新基线上激活）
+- **dsh-desktop（Electron 桌面版）无法刷新模型目录**：运行时树（含 pi-ai 唯一副本）打包在只读的 `app.asar` 内，数据级目录补丁物理不可写。v1.2.4 起该形态被显式识别：刷新入口置灰 + `catalog-not-writable` 结构化报错（v1.2.3 及之前会抛 `ENOENT ... not found in ...app.asar` 天书并遗留 prepared journal）。登录/注销/settings 模型目录镜像不受影响；目录刷新请用 Web/服务部署形态（ADR 0002）
 - 并发保护为宿主单进程内 mutex，**不支持多实例/多进程并发刷新**
 - 状态落盘后的目录 fsync 仅在 POSIX 执行：Windows 无目录 fsync 语义（对目录句柄 fsync 必然 `EPERM`），win32 直接跳过、不再刷告警，目录项一致性由 NTFS 元数据日志保证（v1.2.3 起，issue #1）；POSIX 行为不变
 

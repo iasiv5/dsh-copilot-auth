@@ -54,6 +54,7 @@ const DICTS = {
     srcLocal: "Catalog source: local only (npm fetch failed)",
     srcOverlay: "Catalog source: bundled overlay (offline bootstrap)",
     none: "(none)",
+    notWritable: "This DSH installation packages the model catalog read-only (inside app.asar) — the refresh cannot be written. Use a web/service deployment for catalog refresh, or wait for a desktop build that unpacks pi-ai.",
   },
   zh: {
     nav: "GHC设置",
@@ -97,6 +98,7 @@ const DICTS = {
     srcLocal: "目录来源：仅本地目录（npm 拉取失败）",
     srcOverlay: "目录来源：内置覆盖层（离线 bootstrap）",
     none: "（无）",
+    notWritable: "当前 DSH 安装把模型目录打包在只读的 app.asar 内，刷新无法写入。请在 Web/服务部署形态下刷新目录，或等待桌面版提供可写布局后重试。",
   },
 };
 
@@ -253,6 +255,7 @@ function RefreshModal({ t, flow, onConfirm, onCancel, onOverlay }) {
         <p style={styles.risk}>⚠ {t("riskRemoved")}</p>
         <p style={styles.risk}>⚠ {t("riskReset")}</p>
         <p style={styles.risk}>⚠ {t("riskRestart")}</p>
+        {p.catalogWritable === false && <p style={styles.error}>⚠ {t("notWritable")}</p>}
         <div style={styles.modalActions}>
           {p.catalogSource === "local" && (
             <button type="button" style={{ ...styles.button, ...styles.secondary, marginRight: "auto" }} onClick={onOverlay}>
@@ -260,7 +263,14 @@ function RefreshModal({ t, flow, onConfirm, onCancel, onOverlay }) {
             </button>
           )}
           <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
-          <button type="button" style={{ ...styles.button, ...styles.primary }} onClick={onConfirm}>{t("confirmRefresh")}</button>
+          <button
+            type="button"
+            style={{ ...styles.button, ...styles.primary, ...(p.catalogWritable === false ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+            disabled={p.catalogWritable === false}
+            onClick={onConfirm}
+          >
+            {t("confirmRefresh")}
+          </button>
         </div>
       </div>
     </div>
@@ -400,19 +410,22 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
           <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={logout}>{t("logout")}</button>
           <button
             type="button"
-            style={{ ...styles.button, ...styles.primary }}
-            disabled={flow.name === "previewing" || flow.name === "applying"}
+            style={{ ...styles.button, ...styles.primary, ...(flow.catalogWritable === false ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+            disabled={flow.catalogWritable === false || flow.name === "previewing" || flow.name === "applying"}
             onClick={() => drive({ type: "start" })}
           >
             {flow.name === "previewing" ? t("refreshing") : flow.name === "applying" ? t("applying") : t("refreshNow")}
           </button>
         </div>
       )}
+      {page === "authorized" && flow.catalogWritable === false && flow.name !== "failed" && (
+        <p style={styles.banner}>⚠ {t("notWritable")}</p>
+      )}
       {page === "authorized" && flow.name === "restartNeeded" && (
         <p style={styles.banner}>⚠ {t("restartNeeded")}</p>
       )}
       {page === "authorized" && flow.name === "failed" && (
-        <p style={styles.error}>{flow.error === "state-corrupt" ? t("stateCorrupt") : flow.error}</p>
+        <p style={styles.error}>{flow.error === "state-corrupt" ? t("stateCorrupt") : flow.error === "catalog-not-writable" ? t("notWritable") : flow.error}</p>
       )}
       {flow.name === "confirming" && (
         <RefreshModal

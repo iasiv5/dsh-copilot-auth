@@ -1,7 +1,7 @@
 // catalog.mjs — 数据核心：tgz 严格解析、条目校验、只增不更新合并、diff、digest、
 // pi-ai 安装定位。合并语义「只增不更新」（ADR 0001）：已有 id 的元数据永不覆盖。
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, existsSync, openSync, readFileSync, realpathSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { gunzipSync } from "node:zlib";
 
@@ -153,4 +153,46 @@ export function findPiAiInstallation({ startPath } = {}) {
     }
   } catch { /* 安装树结构变化 → null（调用方降级） */ }
   return null;
+}
+
+// ==================== 安装目标可写性分类（desktop asar 只读问题，ADR 0002） ====================
+// dsh-desktop（Electron）把整个运行时树打进 resources/app.asar，pi-ai 是其中唯一副本：
+// asar 虚拟文件系统读没问题、创建/写入必被拒（ENOENT "... not found in <archive>"）。
+// 数据级目录补丁在写盘前必须先分类目标，把"物理不可写"变成结构化错误而不是天书 ENOENT。
+
+// Electron 的 asar 拦截按"路径中任一段以 .asar 结尾"判定（大小写不敏感，分隔符 / 与 \ 都认，
+// Win 路径在 POSIX 主机上测试时也要能识别）。.asar.unpacked 不以 .asar 结尾，不会误判。
+export function isAsarPath(p) {
+  const s = String(p ?? "");
+  if (/\.asar$/i.test(s)) return true;
+  return s.split(/[\\/]/).some((seg) => /\.asar$/i.test(seg));
+}
+
+// 功能性可写探测：在目录内排他创建 + 删除一个探针文件。覆盖 asar 之外的不可写形态
+// （只读卷、根属主安装、ACL 拒绝——win32 chmod 弱语义下唯一可靠的通用手段）。
+// 探针文件名带 UUID，排他创建，任何失败路径都尝试清理并返回 false。
+export function probeWritable(dir) {
+  const probe = join(dir, `.copilot-auth-write-probe-${randomUUID()}`);
+  let fd;
+  try {
+    fd = openSync(probe, "wx");
+    closeSync(fd);
+    fd = undefined;
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) {
+      try { closeSync(fd); } catch { /* 已关闭 */ }
+    }
+    try { unlinkSync(probe); } catch { /* 探针可能未创建成功 */ }
+  }
+}
+
+// 分类结果平铺进安装对象：writable: boolean；不可写时 unwritableReason: "asar" | "probe-failed"。
+// writableProbe 仅作测试注入钩子（生产恒用默认实现）。
+export function classifyCatalogTarget(catalogFile, writableProbe = probeWritable) {
+  if (isAsarPath(catalogFile)) return { writable: false, unwritableReason: "asar" };
+  if (!writableProbe(dirname(catalogFile))) return { writable: false, unwritableReason: "probe-failed" };
+  return { writable: true, unwritableReason: null };
 }

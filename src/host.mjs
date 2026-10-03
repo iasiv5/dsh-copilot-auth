@@ -8,7 +8,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CREDENTIAL_KEY, emptyState, routes } from "./shared.mjs";
 import { readJson, writeJsonAtomic, createMutex } from "./atomic-json.mjs";
-import { mergeCatalog, diffModels, digest, findPiAiInstallation } from "./catalog.mjs";
+import { mergeCatalog, diffModels, digest, findPiAiInstallation, classifyCatalogTarget } from "./catalog.mjs";
 import { fetchLatestCatalog } from "./catalog-fetch.mjs";
 import { fetchLiveAvailableModelIds } from "./copilot-models.mjs";
 import { loadState, saveState, freshState, createJournal, advanceJournal, restartMarker, setLastError, clearLastError } from "./state.mjs";
@@ -163,22 +163,37 @@ function readBody(req) {
 // 版本与 catalog 同根解析（R3-8）：注入 catalogFile 时 version 取其所在根的
 // package.json（opts.piAiVersion 为测试钩子）；生产走 findPiAiInstallation()。
 function resolveInstall(opts) {
+  let install;
   if (opts.catalogFile) {
-    if (opts.piAiVersion) return { catalogFile: opts.catalogFile, version: opts.piAiVersion };
-    const root = dirname(dirname(dirname(dirname(opts.catalogFile))));
-    const packageJsonFile = join(root, "package.json");
-    const pkg = JSON.parse(readFileSync(packageJsonFile, "utf8"));
-    return { catalogFile: opts.catalogFile, packageJsonFile, version: pkg.version };
+    if (opts.piAiVersion) {
+      install = { catalogFile: opts.catalogFile, version: opts.piAiVersion };
+    } else {
+      const root = dirname(dirname(dirname(dirname(opts.catalogFile))));
+      const packageJsonFile = join(root, "package.json");
+      const pkg = JSON.parse(readFileSync(packageJsonFile, "utf8"));
+      install = { catalogFile: opts.catalogFile, packageJsonFile, version: pkg.version };
+    }
+  } else {
+    const found = findPiAiInstallation();
+    if (!found) throw new Error("pi-ai installation not found");
+    install = found;
   }
-  const found = findPiAiInstallation();
-  if (!found) throw new Error("pi-ai installation not found");
-  return found;
+  // 可写性门禁（ADR 0002）：desktop asar 打包形态下 catalogFile 在只读归档内——读一切
+  // 正常、写必被拒。这里统一分类，apply/boot 据此结构化快速失败而非抛天书 ENOENT。
+  // opts.writableProbe 为测试注入钩子（生产恒用默认探测实现）。
+  return { ...install, ...classifyCatalogTarget(install.catalogFile, opts.writableProbe) };
 }
 
 function readLocalCatalog(opts) {
-  const file = resolveInstall(opts).catalogFile;
-  const bytes = readFileSync(file);
-  return { file, bytes, catalog: JSON.parse(bytes.toString("utf8")) };
+  const install = resolveInstall(opts);
+  const bytes = readFileSync(install.catalogFile);
+  return {
+    file: install.catalogFile,
+    bytes,
+    catalog: JSON.parse(bytes.toString("utf8")),
+    writable: install.writable,
+    unwritableReason: install.unwritableReason,
+  };
 }
 
 // 账号可用模型：现场拉取（显式耦合 0.84.4）→ 任何失败回退凭证缓存 availableModelIds
@@ -299,6 +314,13 @@ async function bootRefresh(ctx, opts) {
       }
       const replay = mergeCatalog(readDiskCatalog(), state.journal.pendingOverlay);
       if (replay.added.length > 0) {
+        // 可写性门禁（ADR 0002）：不可写目标不重试写盘——journal 原样保留，安装将来
+        // 变可写（如桌面版改为解包 pi-ai）后本恢复自动完成。零写入、可 grep 的 lastError。
+        if (!install.writable) {
+          state = setLastError(state, `catalog-not-writable (${install.unwritableReason}): pi-ai catalog is read-only; prepared journal kept, refresh will complete automatically once the target becomes writable`);
+          saveState(stateFile, state);
+          return;
+        }
         writeJsonAtomic(install.catalogFile, replay.merged);
         bootPatched = true;
       }
@@ -327,11 +349,18 @@ async function bootRefresh(ctx, opts) {
         } else if (install.version === baseline) {
           const replay = mergeCatalog(readDiskCatalog(), state.appliedOverlay);
           if (replay.added.length > 0) {
-            writeJsonAtomic(install.catalogFile, replay.merged); // 原子重放
-            bootPatched = true;
-            state.restartState = restartMarker("self-heal", digest(state.appliedOverlay));
-            state = clearLastError(state);
-            saveState(stateFile, state);
+            // 可写性门禁（ADR 0002）：自愈同理不重试写盘——appliedOverlay 保留，
+            // 目标可写后下一 boot 重放；不抛错、不阻断启动序列。
+            if (!install.writable) {
+              state = setLastError(state, `catalog-not-writable (${install.unwritableReason}): pi-ai catalog is read-only; self-heal deferred, overlay entries stay pending`);
+              saveState(stateFile, state);
+            } else {
+              writeJsonAtomic(install.catalogFile, replay.merged); // 原子重放
+              bootPatched = true;
+              state.restartState = restartMarker("self-heal", digest(state.appliedOverlay));
+              state = clearLastError(state);
+              saveState(stateFile, state);
+            }
           }
         } else {
           const missing = overlayIds.filter((id) => !diskIds(readDiskCatalog()).has(id));
@@ -566,6 +595,7 @@ export function apply(ctx, opts = {}) {
         piAiVersion: install?.version ?? null,
         catalogDigest,
         catalogFile: install?.catalogFile ?? null,
+        catalogWritable: install ? install.writable === true : null,
       };
       json(res, 200, { configured, syncError: lastSyncError, refresh });
     },
@@ -615,6 +645,7 @@ export function apply(ctx, opts = {}) {
           source: inputs.source,
           catalogSource: inputs.resolved.catalogSource,
           catalogError: inputs.resolved.catalogError,
+          catalogWritable: inputs.local.writable,
           skipped: inputs.merged.skipped,
           added: inputs.diff.added,
           removed: inputs.diff.removed,
@@ -665,6 +696,14 @@ export function apply(ctx, opts = {}) {
           }
           // digest 全部一致后才解析版本（写入失败点上移，500 不留 journal）
           const install = resolveInstall(opts);
+          // 可写性门禁（ADR 0002）：不可写目标在 write-ahead 之前快速失败——绝不留
+          // prepared journal（desktop asar 形态下那会让每个 boot 都重试写归档）。
+          if (!install.writable) {
+            return {
+              code: 400,
+              payload: { ok: false, error: "catalog-not-writable", reason: install.unwritableReason, catalogFile: install.catalogFile },
+            };
+          }
           const stateFile = opts.stateFile ?? defaultStateFile();
           const patchedBytes = Buffer.from(JSON.stringify(inputs.merged.merged, null, 2) + "\n", "utf8");
           let state = loadState(stateFile);

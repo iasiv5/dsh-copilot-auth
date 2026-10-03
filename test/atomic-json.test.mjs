@@ -51,10 +51,15 @@ test("writeAll：短写循环补写 + 零进度防死循环（R4-2，方案 A：
 
 test("fsyncDirectory：win32 无目录 fsync 语义，直接跳过（issue #1）", () => {
   const realPlatform = process.platform;
-  // POSIX 基线：真实实现确实打开并 fsync 目录——成功路径不抛；不存在路径抛 ENOENT 证明非空操作
-  fsyncDirectory(mkdtempSync(join(tmpdir(), "aj-")));
   const bogus = join(tmpdir(), "fsyncdir-not-exist");
-  assert.throws(() => fsyncDirectory(bogus), (err) => err.code === "ENOENT");
+  if (realPlatform === "win32") {
+    // win32 原生：跳过即默认行为——不存在路径也不抛（打开目录句柄的动作根本不发生）
+    assert.equal(fsyncDirectory(bogus), undefined);
+  } else {
+    // POSIX 基线：真实实现确实打开并 fsync 目录——成功路径不抛；不存在路径抛 ENOENT 证明非空操作
+    fsyncDirectory(mkdtempSync(join(tmpdir(), "aj-")));
+    assert.throws(() => fsyncDirectory(bogus), (err) => err.code === "ENOENT");
+  }
   // mock win32：跳过后未触碰 fs（不存在路径也不抛），端到端落盘无告警
   Object.defineProperty(process, "platform", { value: "win32" });
   try {
