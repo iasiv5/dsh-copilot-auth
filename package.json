@@ -1,6 +1,6 @@
 {
   "name": "@inventec/dsh-copilot-auth",
-  "version": "1.2.6",
+  "version": "1.2.7",
   "description": "为内置 Copilot 提供方补设备码登录/注销设置页，预置开箱路由；凭据入内置凭据库，模型目录兜底不覆盖定制。适配 DSH 0.1.7+（settings API 重塑后；≤0.1.5 请用 1.1.x）。",
   "type": "module",
   "license": "MIT",
