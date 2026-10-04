@@ -286,6 +286,7 @@ const styles = {
   added: { color: "#37b24d" },
   removed: { color: "#e03131" },
   skipped: { color: "#f59f00" },
+  muted: { opacity: 0.6 },
   risk: { margin: 0, fontSize: 12, lineHeight: "18px", color: "#e8590c" },
   modalActions: { display: "flex", gap: 10, justifyContent: "flex-end", marginTop: 4 },
   mono: { fontFamily: "ui-monospace, monospace" },
@@ -398,6 +399,9 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
         <p style={styles.modalText}><strong>{t("removedModels")}</strong>（{(diff.removed ?? []).length}）</p>
         {list(diff.removed ?? [], styles.removed, (x) => `${x.id} — ${t(x.reason === "unresolvable" ? "removedUnresolvable" : "removedAccount")}`)}
         <p style={styles.modalText}><strong>{t("keptModels")}</strong>（{(diff.kept ?? []).length}）</p>
+        {/* 保留清单（v1.2.17）：弱化色＝不变的部分，与增（亮绿）/删（红）区分；
+            让预览成为「应用后完整终态」的可审计视图（重建场景尤甚） */}
+        {list(diff.kept ?? [], styles.muted)}
         {(diff.warnings ?? []).length > 0 && (
           <>
             <p style={styles.modalText}><strong>{t("warnings")}</strong>（{diff.warnings.length}）</p>
