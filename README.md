@@ -23,7 +23,7 @@
 - ➕➖ **补充模型 / 重建模型列表（v2 双入口）**：「补充」默认非破坏——候选模型默认全不勾选，勾选后才加入，现有对象/顺序/modelOverrides 全部保留；「重建」显式确认后按「账号可用 ∩ 目录可解析」重建纯 ID 列表并清空本路由 modelOverrides（二次确认 + 空目标单独确认）。预览快照 10 分钟有效、绑定选择；同一操作幂等可查；配置并发编辑优先受保护
 - 🌐 **中/英双语界面**：跟随 DSH 语言设置自动切换
 - 🔑 **凭据安全托管**：存入 DSH 内置凭据库（文件强制 0600 权限），Copilot 临时 token 到期自动刷新
-- 🧪 **测试与 CI**：183 条单元测试（ubuntu/windows/macos 三平台矩阵）；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
+- 🧪 **测试与 CI**：181 条单元测试（ubuntu/windows/macos 三平台矩阵）；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
 
 ## 前置要求
 
@@ -33,6 +33,7 @@
 
 | 本插件 | DSH 实测版本 | authorization 服务 | 说明 |
 |---|---|---|---|
+| v1.2.8+ | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | **协议 v2：诚实的授权语义＋补充/重建双入口**。授权侧：等待中可「请求撤回」（结果如实显示待核实）、退出/重新授权在宿主可证明安全前禁用并说明、单实例 attempt、15 分钟等待上限、晚到授权成功不再写配置；模型侧：旧「刷新」拆为「补充模型」（候选默认不勾选、非破坏）与「重建模型列表」（二次确认＋清 modelOverrides），预览 10 分钟绑定选择、operationId 幂等、配置并发编辑优先、崩溃可恢复（「结束旧配置意图」显式闭环），状态按 profile 隔离（旧全局状态只读提示）；模型路由要求 `protocolVersion:2`，GET `/status` 零写探针；v1 函数族已从 state.mjs 移除 |
 | v1.2.7+ | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | **重启后自动恢复**：注入后以宿主 `listModels` 复核，未端出即**净零切换**（`displayName` 改后复原；两次真内容变化 ⇒ 宿主必然重建快照，用户配置逐字节不变）触发重建；另加双路取实例 + `registryInstanceMismatch`/`registryVia` 诊断。修复 v1.2.6 的"同值写不改变配置身份 ⇒ 快照不重建" |
 | v1.2.6 | `0.1.7-rc.2`+ | runtime 内置，插件不挂载 | 首次引入宿主侧复核与 `settingsNotServed` 诊断；重启自愈用的"同值触碰"**实测不足**（同值写不改变配置对象身份），重启后模型可能仍不出现——请用 v1.2.7 |
 | v1.2.5 | `0.1.7-rc.2`+（`0.2.0-rc.1` web 与 `0.2.0-rc.2` desktop 已实测） | runtime 内置，插件不挂载 | **desktop 只读形态可刷新**：进程内目录注册表注入（ADR 0003），无需重启、不碰官方产物；`0.2.0-rc.2` desktop **实机端到端已验**（注入条目完成真实推理请求）；同批修复 pi-ai ≥0.99.0 的 `chat:` 目录键格式。**已知缺陷**：重启后若宿主快照先于注入定稿，注入条目会被丢弃（v1.2.6 修复） |
@@ -109,7 +110,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 ge
 
 ```bash
 npm install
-npm test        # node:test：patch 结构 + host/授权控制器/客户端状态机/模型策略/预览服务/事务内核/profile 隔离 共 183 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
+npm test        # node:test：patch 结构 + host/授权控制器/客户端状态机/模型策略/预览服务/事务内核/profile 隔离 共 181 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
 npm run build   # esbuild 打包 client 到 lib/client.js（__ModuleLoader__ 信封）
 npm pack --dry-run
 ```

@@ -2,7 +2,7 @@
 
 状态：2026-10-04 由[计划A：授权与状态](<2026-10-03-copilot-authorization-state-implementation-plan.md>)与[计划B：模型事务](<2026-10-03-copilot-model-transactions-implementation-plan.md>)合并简化而成，**取代二者作为唯一实施依据**。设计事实以[设计规格](<../design/2026-10-03-dual-profile-auth-and-models.md>)与[ADR 0004](<../adr/0004-safe-model-management-and-profile-isolation.md>)为准，本计划只保留其中用户可感知的正确性修复与功能拆分，防御性协议机器按「非目标」节明确裁掉。2026-10-04 第 1 轮独立评审提出 12 项问题（1 阻断／3 重要／8 建议），已全部修订并经第 2 轮复核确认；第 2 轮另提 6 项（1 重要／5 建议）、第 3 轮再提 2 项（1 重要／1 建议）均已修订入本版。
 
-**执行记录（2026-10-04）**：T0–T12 已全部在 main 分支实施完成（checkpoint：`ffc26ed` 阶段一 T0–T5、`d778dd1` 阶段二/三 T6–T12）；`npm run build` 产物同步、`npm pack --dry-run` 22 文件含全部 7 个新模块且无测试/秘密文件。未发布（G09）；实机人工验收清单待用户另行授权后执行。全量测试经两轮执行评审后为 **187 条全绿**（初版 183 → 第 1 轮评审 +2 → 第 2 轮评审 +2）。
+**执行记录（2026-10-04）**：T0–T12 已全部在 main 分支实施完成（checkpoint：`ffc26ed` 阶段一 T0–T5、`d778dd1` 阶段二/三 T6–T12）；`npm run build` 产物同步、`npm pack --dry-run` 22 文件含全部 7 个新模块且无测试/秘密文件。未发布（G09）；实机人工验收清单待用户另行授权后执行。全量测试经两轮执行评审后为 187 条全绿（初版 183 → 第 1 轮评审 +2 → 第 2 轮评审 +2）。**v1.2.8 发布清理**：删除 state.mjs v1 函数族及其 6 条历史回归（restartMarker 保留，事务内核仍在用），终版 **181 条全绿**；README 版本矩阵补 v1.2.8 行，版本号 bump 1.2.8 经 OIDC（GitHub Actions Trusted Publishing）发布。
 
 **执行后评审修订（2026-10-04，第 1 轮执行评审，13 项：2 重要／11 建议）**：已修复 withdrawalDelivery 写入 attempt（快照如实反映）、补通道门控状态机测试、boot 终态按 baseline↔target 计数、T4 跳过原因入日志、词典去重/清死键、快照过期淘汰、405 方法守卫用例；并记录如下**有意偏离**：① T8「Modify src/copilot-models.mjs」未改该文件——fetchedAt/缓存逻辑落在 refresh-service.mjs 内（`fetchLiveAvailableModelIds` 原样复用），语义全部达成；② checkpoint 边界 T6–T12 合并为单提交（T11/T12 未单独切分）；③ blockedReason 实际仅产生 `inject-unavailable`/`install-unresolved`，实例分歧与只读安装经诊断字段表达（见契约表修订）。
 
