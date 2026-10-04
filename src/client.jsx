@@ -354,15 +354,27 @@ function RefreshModal({ t, flow, materializing, onSelect, onConfirm, onCancel, o
     <div style={styles.modalMask} role="dialog" aria-modal="true" onKeyDown={escCancel}>
       {/* 固定高度＋三段式（头部/可滚动内容/常驻操作栏）：勾选与物化往返不再
           改变卡片尺寸——主人 2026-10-05 反馈的「卡片变大缩小闪眼睛」修复 */}
-      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, height: "min(80vh, 680px)", padding: 0, overflow: "hidden" }}>
+      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, height: "min(80vh, 680px)", padding: 0, overflow: "hidden", position: "relative" }}>
+        {/* 物化指示＝右上角浮层：绝对定位不占布局流（透明度渐显渐隐）——
+            占位行方案不位移但留空行，浮层两全（v1.2.15） */}
+        <div
+          style={{
+            position: "absolute", top: 16, right: 20, zIndex: 2,
+            display: "flex", alignItems: "center", gap: 6, padding: "3px 12px",
+            borderRadius: 999, border: "1px solid rgba(128,128,128,0.35)",
+            background: surface.current.bg, color: "#f59f00",
+            fontSize: 12, lineHeight: "18px", whiteSpace: "nowrap",
+            opacity: materializing ? 1 : 0, transition: "opacity 150ms ease",
+            pointerEvents: "none",
+          }}
+        >
+          ⓘ {t("refreshing")}
+        </div>
         <div style={{ padding: "18px 20px 6px" }}>
           <h4 style={styles.modalTitle}>{t(isRebuild ? "rebuildTitle" : "supplementTitle")}</h4>
           {flow.staleNotice && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
           <p style={styles.modalText}>{sourceLine}</p>
           {p.evidence?.stale === true && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
-          {/* 常驻占位行：物化指示只做显隐（visibility），不插入/移除节点——
-              否则每次物化把整卡内容下压再弹回（v1.2.13 遗留的上下弹跳根因） */}
-          <p style={{ ...styles.banner, minHeight: 20, visibility: materializing ? "visible" : "hidden" }}>ⓘ {t("refreshing")}</p>
         </div>
         <div style={{ flex: 1, overflowY: "auto", minHeight: 0, scrollbarGutter: "stable", padding: "0 20px", opacity: materializing ? 0.55 : 1, pointerEvents: materializing ? "none" : "auto" }}>
         {!isRebuild && (
