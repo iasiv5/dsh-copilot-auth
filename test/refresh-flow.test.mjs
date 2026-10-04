@@ -1,213 +1,216 @@
-import { test } from "node:test";
+// T11：客户端模型流（协议 v2）——勾选 materialize、确认门、423/unknown、retire 闭环、
+// 预览过期重置、显式切源、双击安全。
+import test from "node:test";
 import assert from "node:assert/strict";
-import { initial, reduce, runEffect, advance } from "../src/refresh-flow.mjs";
+import { initial, reduce, advance } from "../src/refresh-flow.mjs";
 
-// ---------- 夹具 ----------
-const PREVIEW = {
-  ok: true, source: "cache", catalogSource: "latest", catalogError: null,
-  skipped: [], added: ["gpt-b"], removed: ["gpt-dead"], kept: ["gpt-a"], target: ["gpt-a", "gpt-b"],
-  customizationReset: { modelEntryIds: [], modelOverrideIds: [] },
-  digests: { settings: "s", available: "a", catalog: "c", remote: "r" },
-};
-const OVERLAY_PREVIEW = { ...PREVIEW, catalogSource: "overlay" };
+const jsonResponse = (spec) => ({
+  status: spec.status ?? 200,
+  ok: (spec.status ?? 200) >= 200 && (spec.status ?? 200) < 300,
+  headers: { get: () => "application/json" },
+  text: async () => JSON.stringify(spec.body ?? { ok: true }),
+});
 
-function mockFetch(script) {
-  // script: { [urlSuffix]: response | response[] }，response = { status, body }
+const previewBody = (over = {}) => ({
+  ok: true,
+  previewId: over.previewId ?? "pv-1",
+  operationId: over.operationId ?? "op-1",
+  operation: over.operation ?? "supplement",
+  expiresAt: "2026-10-04T12:00:00.000Z",
+  evidence: over.evidence ?? { source: "live", fetchedAt: "2026-10-04T11:50:00.000Z", stale: false },
+  catalogSource: over.catalogSource ?? "latest",
+  catalogError: null,
+  skipped: [],
+  diff: over.diff ?? {
+    targetView: { modelsPresent: true, models: [{ id: "a" }], modelOverridesPresent: false, modelOverrides: null },
+    candidates: ["b", "c"],
+    added: over.added ?? [],
+    removed: [],
+    kept: ["a"],
+    warnings: [],
+    writeSet: { catalogEntries: true, models: false, modelOverrides: false },
+  },
+});
+
+// fetch 路由：记录 URL 与请求体；可按 URL 配置响应或挂起
+function makeFetch() {
   const calls = [];
-  const fetchImpl = async (url, init) => {
-    calls.push({ url, init });
-    const key = Object.keys(script).find((k) => url.endsWith(k));
-    if (!key) throw new Error("unexpected fetch: " + url);
-    const entry = script[key];
-    const res = Array.isArray(entry) ? entry[Math.min(calls.filter((c) => c.url.endsWith(key)).length - 1, entry.length - 1)] : entry;
-    return { status: res.status, ok: res.status >= 200 && res.status < 300, json: async () => res.body };
+  const bodies = [];
+  const routes = new Map();
+  const wrapped = async (url, init) => {
+    calls.push(url);
+    if (init?.body) bodies.push({ url, body: JSON.parse(init.body) });
+    const spec = routes.get(url) ?? { body: { ok: true } };
+    if (spec.defer) return await spec.defer();
+    return jsonResponse(spec);
   };
-  return { fetchImpl, calls };
+  wrapped.calls = calls;
+  wrapped.bodies = bodies;
+  wrapped.respond = (url, spec) => routes.set(url, spec);
+  return wrapped;
 }
 
-const okJson = (body) => ({ status: 200, body });
+const P = "/copilot-auth/refresh/preview";
+const A = "/copilot-auth/refresh/apply";
+const R = "/copilot-auth/refresh/retire";
+const S = "/copilot-auth/status";
 
-// ---------- reducer 纯函数 ----------
-test("reducer 正常流转：idle → previewing → confirming → applying → restartNeeded", () => {
-  let [s, fx] = reduce(initial, { type: "start" });
-  assert.equal(s.name, "previewing");
-  assert.equal(s.mode, undefined);
-  assert.deepEqual(fx, { type: "preview", mode: undefined });
-  [s, fx] = reduce(s, { type: "preview-ok", preview: PREVIEW });
+test("预览→确认：候选就位、勾选经 basePreviewId materialize、确认后 apply", async () => {
+  const f = makeFetch();
+  f.respond(P, { body: previewBody() });
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
   assert.equal(s.name, "confirming");
-  assert.equal(s.staleNotice, false);
-  assert.equal(s.preview, PREVIEW);
-  assert.equal(fx, null);
-  [s, fx] = reduce(s, { type: "confirm" });
-  assert.equal(s.name, "applying");
-  assert.deepEqual(fx, { type: "apply", mode: undefined, digests: PREVIEW.digests });
-  [s, fx] = reduce(s, { type: "apply-ok" });
-  assert.equal(s.name, "restartNeeded");
-  assert.equal(fx, null);
-});
-
-test("reducer：preview 失败 → failed；failed 可 dismiss 回 idle 或直接重来", () => {
-  let [s] = reduce(initial, { type: "start" });
-  [s] = reduce(s, { type: "preview-fail", error: "boom" });
-  assert.deepEqual(s, { name: "failed", error: "boom" });
-  let [s2, fx2] = reduce(s, { type: "dismiss" });
-  assert.deepEqual(s2, initial);
-  assert.equal(fx2, null);
-  [s2, fx2] = reduce(s, { type: "start" });
-  assert.equal(s2.name, "previewing");
-  assert.ok(fx2);
-});
-
-test("reducer：apply 409 → previewing(stale, 原 mode) → confirming(staleNotice:true)", () => {
-  let [s, fx] = reduce({ name: "applying", mode: "overlay", digests: PREVIEW.digests }, { type: "apply-stale" });
-  assert.equal(s.name, "previewing");
-  assert.equal(s.mode, "overlay", "409 后保持原 mode（R2-5）");
-  assert.equal(s.stale, true);
-  assert.deepEqual(fx, { type: "preview", mode: "overlay" });
-  [s, fx] = reduce(s, { type: "preview-ok", preview: PREVIEW });
+  assert.deepEqual(s.preview.diff.candidates, ["b", "c"]);
+  // 勾选 b：materialize（服务端从原快照重算，不重新取数）
+  f.respond(P, { body: previewBody({ previewId: "pv-2", operationId: "op-2", added: ["b"] }) });
+  s = await advance(s, { type: "select", selectedIds: ["b"] }, f);
   assert.equal(s.name, "confirming");
-  assert.equal(s.staleNotice, true, "UI 提示「数据已变化，请重新确认」");
-  assert.equal(fx, null);
+  assert.equal(s.preview.previewId, "pv-2");
+  const materialize = f.bodies.find((x) => x.url === P && x.body.basePreviewId === "pv-1");
+  assert.ok(materialize, "选择变化必须走 basePreviewId");
+  assert.deepEqual(materialize.body.selectedIds, ["b"]);
+  // 确认（补充无需二次确认）→ apply 携带 previewId+operationId
+  f.respond(A, { body: { ok: true, operationId: "op-2", result: { status: "applied", changes: { modelsAdded: 1 } } } });
+  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
+  assert.equal(s.name, "result");
+  assert.equal(s.result.status, "applied");
+  const applyBody = f.bodies.find((x) => x.url === A);
+  assert.deepEqual([applyBody.body.previewId, applyBody.body.operationId], ["pv-2", "op-2"]);
+  assert.equal(applyBody.body.protocolVersion, 2);
 });
 
-test("reducer：409 后重新 preview 也失败 → failed", () => {
-  let [s, fx] = reduce({ name: "applying", mode: undefined, digests: {} }, { type: "apply-stale" });
-  [s] = reduce(s, { type: "preview-fail", error: "still down" });
-  assert.deepEqual(s, { name: "failed", error: "still down" });
+test("零勾选＋目录增量：结果为 pending-restart（目录落地、列表零变化），非 no-change", async () => {
+  const f = makeFetch();
+  f.respond(P, { body: previewBody({ added: [] }) });
+  f.respond(A, { body: { ok: true, operationId: "op-1", result: { status: "pending-restart", changes: { catalogAdded: 2, modelsAdded: 0 } } } });
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
+  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
+  assert.equal(s.name, "pendingRestart");
+  assert.equal(s.result.changes.catalogAdded, 2);
+  assert.equal(s.result.changes.modelsAdded, 0);
+  assert.notEqual(s.result.status, "no-change");
 });
 
-test("reducer：apply 500 → failed；confirming 取消 → idle", () => {
-  let [s] = reduce({ name: "applying", mode: undefined, digests: {} }, { type: "apply-fail", error: "server 500" });
-  assert.deepEqual(s, { name: "failed", error: "server 500" });
-  [s] = reduce({ name: "confirming", preview: PREVIEW, mode: undefined, staleNotice: false }, { type: "cancel" });
-  assert.deepEqual(s, initial);
-});
-
-test("reducer：applying 态忽略重复 confirm/start（双击只发一次）", () => {
-  const applying = { name: "applying", mode: undefined, digests: PREVIEW.digests };
-  for (const ev of [{ type: "confirm" }, { type: "start" }]) {
-    const [s, fx] = reduce(applying, ev);
-    assert.equal(s, applying, "applying 态重复事件被忽略");
-    assert.equal(fx, null);
-  }
-  const previewing = { name: "previewing", mode: undefined, stale: false };
-  const [s2, fx2] = reduce(previewing, { type: "start" });
-  assert.equal(s2, previewing);
-  assert.equal(fx2, null);
-});
-
-test("reducer：confirming 态可改用 overlay 重 preview（R2-5 的 UI 入口）", () => {
-  const confirming = { name: "confirming", preview: PREVIEW, mode: undefined, staleNotice: false };
-  const [s, fx] = reduce(confirming, { type: "start", mode: "overlay" });
-  assert.equal(s.name, "previewing");
-  assert.equal(s.mode, "overlay");
-  assert.deepEqual(fx, { type: "preview", mode: "overlay" });
-});
-
-test("reducer：confirming 保留 overlay 来源标记（preview.catalogSource）", () => {
-  const [s] = reduce({ name: "previewing", mode: "overlay", stale: false }, { type: "preview-ok", preview: OVERLAY_PREVIEW });
+test("重建确认门：未二次确认/空目标未单独确认 → 不发包", async () => {
+  const f = makeFetch();
+  const rebuildPreview = previewBody({
+    operation: "rebuild",
+    diff: {
+      targetView: { modelsPresent: true, models: [{ id: "a" }, { id: "b" }], modelOverridesPresent: false, modelOverrides: null },
+      candidates: null,
+      added: ["b"],
+      removed: [{ id: "dead", reason: "not-in-account" }],
+      kept: ["a"],
+      warnings: [],
+      writeSet: { catalogEntries: true, models: true, modelOverrides: false },
+    },
+  });
+  f.respond(P, { body: rebuildPreview });
+  let s = await advance(initial, { type: "start", operation: "rebuild" }, f);
   assert.equal(s.name, "confirming");
+  const before = f.calls.length;
+  s = await advance(s, { type: "confirm", second: false, empty: false }, f); // 缺二次确认
+  assert.equal(s.name, "confirming", "确认被忽略");
+  assert.equal(f.calls.length, before, "未发 apply");
+  f.respond(A, { body: { ok: true, operationId: "op-1", result: { status: "applied" } } });
+  s = await advance(s, { type: "confirm", second: true, empty: false }, f);
+  assert.equal(s.name, "result");
+  // 空目标：额外需要 empty 确认
+  f.respond(P, { body: previewBody({ operation: "rebuild", diff: { targetView: { modelsPresent: true, models: [], modelOverridesPresent: false, modelOverrides: null }, candidates: null, added: [], removed: [{ id: "a", reason: "not-in-account" }], kept: [], warnings: [], writeSet: { catalogEntries: false, models: true, modelOverrides: false } } }) });
+  s = await advance(s, { type: "start", operation: "rebuild" }, f);
+  const calls2 = f.calls.length;
+  s = await advance(s, { type: "confirm", second: true, empty: false }, f); // 空集合未单独确认
+  assert.equal(s.name, "confirming");
+  assert.equal(f.calls.length, calls2);
+});
+
+test("stale 证据：确认被忽略（Q7 无有效缓存阻止应用）", async () => {
+  const f = makeFetch();
+  f.respond(P, { body: previewBody({ evidence: { source: "stale", fetchedAt: null, stale: true } }) });
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
+  assert.equal(s.preview.evidence.stale, true);
+  const before = f.calls.length;
+  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
+  assert.equal(s.name, "confirming");
+  assert.equal(f.calls.length, before, "stale 证据不得应用");
+});
+
+test("423 转 status 查询：activeOperation → busy；apply 网络不明 → 查同 ID 不重发", async () => {
+  const f = makeFetch();
+  f.respond(P, { body: previewBody() });
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
+  f.respond(A, { status: 423, body: { ok: false, error: "resource-busy" } });
+  f.respond(S, { body: { refresh: { scopeAvailable: true, catalogMode: "file", activeOperation: { operationId: "op-other", phase: "catalog-landed" }, lastResult: null } } });
+  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
+  assert.equal(s.name, "busy");
+  assert.equal(s.active.operationId, "op-other");
+  assert.equal(f.calls.filter((c) => c === A).length, 1, "忙时不重发 apply");
+  // 网络不明：只查同 operationId
+  f.respond(P, { body: previewBody({ previewId: "pv-9", operationId: "op-9" }) });
+  s = await advance(s, { type: "start", operation: "supplement" }, f);
+  f.respond(A, { defer: () => Promise.reject(new Error("network down")) });
+  f.respond(`${S}?operationId=op-9`, { body: { operation: { query: "unknown" }, refresh: { scopeAvailable: true } } });
+  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
+  assert.equal(s.name, "resultUnknown");
+  assert.equal(s.operationId, "op-9");
+  assert.equal(f.calls.filter((c) => c === A).length, 2, "未知结果只查询不重复 POST");
+  assert.ok(f.calls.some((c) => c === `${S}?operationId=op-9`));
+});
+
+test("recovery-needed → retire 确认 → 重新预览闭环", async () => {
+  const f = makeFetch();
+  const resultState = { ...initial, name: "result", flags: initial.flags, result: { operationId: "op-old", status: "recovery-needed" } };
+  let s = reduce(resultState, { type: "retire-request" })[0];
+  assert.equal(s.name, "retireConfirm");
+  f.respond(R, { body: { ok: true, result: { operationId: "op-old", status: "intent-retired" } } });
+  f.respond(S, { body: { refresh: { scopeAvailable: true, catalogMode: "file", lastResult: { operationId: "op-old", status: "intent-retired" }, activeOperation: null } } });
+  s = await advance(s, { type: "retire-confirm" }, f);
+  assert.equal(s.name, "result");
+  assert.equal(s.result.status, "intent-retired");
+  // 终结且无阻碍负债 → 新预览可用
+  f.respond(P, { body: previewBody({ previewId: "pv-new", operationId: "op-new" }) });
+  s = await advance(s, { type: "start", operation: "supplement" }, f);
+  assert.equal(s.name, "confirming");
+  assert.equal(s.preview.operationId, "op-new");
+});
+
+test("预览过期/漂移（409 preview-stale）→ 自动重新预览并重置确认", async () => {
+  const f = makeFetch();
+  f.respond(P, { body: previewBody() });
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
+  f.respond(A, { status: 409, body: { ok: false, error: "preview-stale" } });
+  f.respond(P, { body: previewBody({ previewId: "pv-2", operationId: "op-2" }) });
+  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
+  assert.equal(s.name, "confirming");
+  assert.equal(s.staleNotice, true, "重新预览后带 stale 提示");
+  assert.equal(s.preview.previewId, "pv-2");
+});
+
+test("本地来源失败 → 显式切源 overlay 生成新预览（不隐式降级，Q7）", async () => {
+  const f = makeFetch();
+  f.respond(P, { body: previewBody({ catalogSource: "local", catalogError: "npm unreachable" }) });
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
+  assert.equal(s.preview.catalogSource, "local");
+  f.respond(P, { body: previewBody({ catalogSource: "overlay", previewId: "pv-o", operationId: "op-o" }) });
+  s = await advance(s, { type: "start", catalogSource: "overlay" }, f);
   assert.equal(s.preview.catalogSource, "overlay");
-  assert.equal(s.mode, "overlay");
+  const overlayReq = f.bodies.find((x) => x.url === P && x.body.catalogSource === "overlay");
+  assert.ok(overlayReq, "切源必须是显式新预览请求");
 });
 
-test("reducer：/status 水合——pendingRestart → restartNeeded；state-corrupt → failed；干净 → idle", () => {
-  let [s, fx] = reduce(initial, { type: "init" });
-  assert.equal(s.name, "idle");
-  assert.deepEqual(fx, { type: "status" });
-  [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: true } } });
-  assert.equal(s.name, "restartNeeded");
-  [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: false, lastError: "state-corrupt" } } });
-  assert.deepEqual(s, { name: "failed", error: "state-corrupt" }, "state-corrupt 走专用文案（🟡-4）");
-  [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: false, lastError: null } } });
-  assert.equal(s.name, "idle");
-  [s] = reduce(initial, { type: "hydrate", status: null }); // status 拉取失败不硬失败
-  assert.equal(s.name, "idle");
-});
-
-test("reducer：水合携带 catalogWritable——false 落态供 UI 置灰；旧宿主缺字段不回退", () => {
-  let [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: false, lastError: null, catalogWritable: false } } });
-  assert.equal(s.catalogWritable, false, "desktop asar 形态 → false 落态");
-  [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: true, catalogWritable: false } } });
-  assert.equal(s.name, "restartNeeded");
-  assert.equal(s.catalogWritable, false, "restartNeeded 态同样携带");
-  [s] = reduce(initial, { type: "hydrate", status: { refresh: { pendingRestart: false, lastError: null } } });
-  assert.equal(s.catalogWritable, null, "旧宿主不带字段 → 保持现值不误置灰");
-});
-
-// ---------- effect runner 接线（Y3-3） ----------
-test("runner：latest 409 后以原 mode 重 preview 恰好一次，不重发 apply", async () => {
-  const { fetchImpl, calls } = mockFetch({
-    "/refresh/apply": { status: 409, body: { ok: false, error: "preview-stale" } },
-    "/refresh/preview": okJson(PREVIEW),
-  });
-  // apply effect → apply-stale
-  let ev = await runEffect({ type: "apply", mode: undefined, digests: PREVIEW.digests }, fetchImpl);
-  assert.equal(ev.type, "apply-stale");
-  // reducer 转 previewing + preview effect；runner 执行
-  const [s, fx] = reduce({ name: "applying", mode: undefined, digests: PREVIEW.digests }, ev);
-  ev = await runEffect(fx, fetchImpl);
-  assert.equal(ev.type, "preview-ok");
-  const applyCalls = calls.filter((c) => c.url.endsWith("/refresh/apply"));
-  const previewCalls = calls.filter((c) => c.url.endsWith("/refresh/preview"));
-  assert.equal(applyCalls.length, 1, "不重发 apply");
-  assert.equal(previewCalls.length, 1, "恰好一次重 preview");
-  assert.equal(JSON.parse(previewCalls[0].init.body).mode, undefined, "latest 模式 body 不带 mode");
-});
-
-test("runner：overlay 409 后仍以 overlay 重 preview", async () => {
-  const { fetchImpl, calls } = mockFetch({
-    "/refresh/apply": { status: 409, body: { ok: false, error: "preview-stale" } },
-    "/refresh/preview": okJson(OVERLAY_PREVIEW),
-  });
-  const ev = await runEffect({ type: "apply", mode: "overlay", digests: PREVIEW.digests }, fetchImpl);
-  const [, fx] = reduce({ name: "applying", mode: "overlay", digests: PREVIEW.digests }, ev);
-  await runEffect(fx, fetchImpl);
-  const previewCalls = calls.filter((c) => c.url.endsWith("/refresh/preview"));
-  assert.equal(JSON.parse(previewCalls[0].init.body).mode, "overlay");
-});
-
-test("runner：重 preview 失败 → preview-fail（reducer → failed）", async () => {
-  const { fetchImpl } = mockFetch({ "/refresh/preview": { status: 500, body: { ok: false, error: "npm down" } } });
-  const ev = await runEffect({ type: "preview", mode: undefined }, fetchImpl);
-  assert.deepEqual(ev, { type: "preview-fail", error: "npm down" });
-  const [s] = reduce({ name: "previewing", mode: undefined, stale: true }, ev);
-  assert.equal(s.name, "failed");
-});
-
-// ---------- controller advance 闭环（🟡-1） ----------
-test("controller：overlay apply 409 → 保持 overlay → 只重 preview 一次 → confirming(staleNotice)", async () => {
-  const { fetchImpl, calls } = mockFetch({
-    "/refresh/preview": [okJson(OVERLAY_PREVIEW), okJson({ ...OVERLAY_PREVIEW, digests: { settings: "s2", available: "a", catalog: "c", remote: "r2" } })],
-    "/refresh/apply": { status: 409, body: { ok: false, error: "preview-stale" } },
-  });
-  // 用户点刷新（overlay 来源由上一次 local preview 的按钮触发）
-  let s = await advance(initial, { type: "start", mode: "overlay" }, fetchImpl);
-  assert.equal(s.name, "confirming");
-  assert.equal(s.staleNotice, false);
-  // 用户确认 → apply 409 → 自动重 preview → confirming(staleNotice)
-  s = await advance(s, { type: "confirm" }, fetchImpl);
-  assert.equal(s.name, "confirming");
-  assert.equal(s.staleNotice, true);
-  assert.equal(s.preview.digests.settings, "s2", "新 diff 的 digest 组已更新");
-  const seq = calls.map((c) => c.url.split("/copilot-auth/")[1]);
-  assert.deepEqual(seq, ["refresh/preview", "refresh/apply", "refresh/preview"], "调用序列：preview → apply(409) → 一次重 preview");
-  assert.equal(JSON.parse(calls[2].init.body).mode, "overlay");
-});
-
-test("controller：init 水合 /status pendingRestart → restartNeeded", async () => {
-  const { fetchImpl } = mockFetch({ "/status": okJson({ configured: true, refresh: { pendingRestart: true } }) });
-  const s = await advance(initial, { type: "init" }, fetchImpl);
-  assert.equal(s.name, "restartNeeded");
-});
-
-test("controller：完整成功链路 advance 直通 restartNeeded", async () => {
-  const { fetchImpl, calls } = mockFetch({
-    "/refresh/preview": okJson(PREVIEW),
-    "/refresh/apply": okJson({ ok: true, restartRequired: true }),
-  });
-  let s = await advance(initial, { type: "start" }, fetchImpl);
-  s = await advance(s, { type: "confirm" }, fetchImpl);
-  assert.equal(s.name, "restartNeeded");
-  assert.equal(calls.length, 2);
+test("applying 期间重复 confirm 被忽略（慢响应不覆盖/双击只发一次）", async () => {
+  const f = makeFetch();
+  let release;
+  f.respond(P, { body: previewBody() });
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
+  f.respond(A, { defer: () => new Promise((r) => { release = r; }) });
+  const p = advance(s, { type: "confirm", second: false, empty: false }, f);
+  await new Promise((r) => setTimeout(r, 5));
+  const [s2, fx2] = reduce({ name: "applying", preview: s.preview }, { type: "confirm" });
+  assert.equal(s2.name, "applying");
+  assert.equal(fx2, null);
+  release(jsonResponse({ body: { ok: true, operationId: "op-1", result: { status: "applied" } } }));
+  s = await p;
+  assert.equal(s.name, "result");
+  assert.equal(f.calls.filter((c) => c === A).length, 1);
 });

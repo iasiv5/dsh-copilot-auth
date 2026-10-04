@@ -29,6 +29,13 @@
     "src/atomic-json.mjs",
     "src/state.mjs",
     "src/refresh-flow.mjs",
+    "src/client-http.mjs",
+    "src/runtime-scope.mjs",
+    "src/auth-host.mjs",
+    "src/auth-flow.mjs",
+    "src/model-update.mjs",
+    "src/refresh-service.mjs",
+    "src/refresh-transaction.mjs",
     "src/catalog-overlay.json"
   ],
   "scripts": {

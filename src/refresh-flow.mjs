@@ -1,143 +1,250 @@
-// refresh-flow.mjs — 「刷新可用模型目录」client 侧状态机。
-// reduce 为纯函数（不执行 I/O）；runEffect/advance 只使用注入的 fetchImpl——
-// 本模块不直接引用全局 fetch，所有网络能力经注入获得（node:test 可测）。
-// 状态：idle → previewing → confirming → applying → restartNeeded / failed；
-// apply 409 → previewing 自动重拉（Y2-1：409 响应不携带新 preview，client 重新
-// POST preview）→ 成功进 confirming(staleNotice)；restartNeeded 可由 /status 水合。
-import { routes } from "./shared.mjs";
+// refresh-flow.mjs — 「补充模型／重建模型列表」client 侧状态机（协议 v2，T11）。
+// reduce 为纯函数；runEffect/advance 只使用注入的 fetchImpl（node:test 可测）。
+// 状态：idle → previewing → confirming（勾选→materialize 循环）→ applying →
+//   result / pendingRestart / checking / busy / resultUnknown；recovery-needed 经
+//   retireConfirm → retiring → 重新预览闭环。
+// 关键规则：
+//  - 候选默认全不勾选；选择变化经 basePreviewId 从原快照 materialize（不重新取数）
+//  - 重建需二次确认；空目标需单独确认（reducer 强制，UI 负责走完流程）
+//  - 423 转 status 查询；apply 网络不明先查同 operationId，绝不换 ID 重发
+//  - 预览过期/漂移（409 preview-stale/auth-changed/preview-invalid）→ 自动重新预览
+import { routes, PROTOCOL_VERSION } from "./shared.mjs";
+import { requestJson } from "./client-http.mjs";
 
-export const initial = Object.freeze({ name: "idle", catalogWritable: null, catalogMode: null });
+export const initial = Object.freeze({
+  name: "idle",
+  flags: { catalogMode: null, blockedReason: null, scopeAvailable: true, legacyStateDetected: false },
+  lastResult: null,
+});
 
-// reduce(state, event) → [nextState, effect | null]
-// effect 为数据化指令：{type:"preview",mode} | {type:"apply",mode,digests} | {type:"status"}
+const fromRefresh = (state, refresh) => ({
+  ...state,
+  flags: {
+    catalogMode: refresh && "catalogMode" in refresh ? refresh.catalogMode : state.flags.catalogMode,
+    blockedReason: refresh && "blockedReason" in refresh ? refresh.blockedReason : state.flags.blockedReason,
+    scopeAvailable: refresh ? refresh.scopeAvailable !== false : state.flags.scopeAvailable,
+    legacyStateDetected: refresh?.legacyStateDetected === true,
+  },
+  lastResult: refresh?.lastResult ?? null,
+});
+
+const restartStates = new Set(["pending-restart"]);
+
 export function reduce(state, event) {
   switch (state.name) {
     case "idle":
     case "failed":
-    case "restartNeeded": {
+    case "result":
+    case "pendingRestart":
+    case "busy":
+    case "resultUnknown": {
       if (event.type === "start") {
-        return [{ name: "previewing", mode: event.mode, stale: false }, { type: "preview", mode: event.mode }];
+        return [{
+          name: "previewing",
+          flags: state.flags ?? initial.flags,
+          operation: event.operation === "rebuild" ? "rebuild" : "supplement",
+          catalogSource: event.catalogSource,
+          stale: false,
+        }, {
+          type: "preview",
+          operation: event.operation === "rebuild" ? "rebuild" : "supplement",
+          catalogSource: event.catalogSource,
+        }];
       }
-      if (state.name === "failed" && event.type === "dismiss") return [initial, null];
-      if (state.name === "idle" && event.type === "init") return [state, { type: "status" }];
+      if (event.type === "init" && state.name === "idle") return [state, { type: "status" }];
+      if (event.type === "check" && state.name === "resultUnknown") {
+        return [{ ...state, name: "checking", operationId: state.operationId }, { type: "statusQuery", operationId: state.operationId }];
+      }
+      if (event.type === "retire-request" && state.name === "result") {
+        return [{ name: "retireConfirm", result: state.result }, null];
+      }
+      if (event.type === "dismiss" && state.name === "failed") {
+        return [{ ...initial, flags: state.flags }, null];
+      }
       if (event.type === "hydrate") {
         const refresh = event.status?.refresh;
-        if (!event.status) return [state, null]; // status 拉取失败不硬失败
-        if (refresh?.lastError === "state-corrupt") return [{ name: "failed", error: "state-corrupt" }, null];
-        if (refresh?.pendingRestart === true) {
-          return [{ name: "restartNeeded", catalogWritable: refresh?.catalogWritable ?? null, catalogMode: refresh?.catalogMode ?? null }, null];
+        if (!event.status) return [state, null];
+        if (refresh?.lastError === "state-corrupt") return [{ ...state, name: "failed", error: "state-corrupt" }, null];
+        const base = fromRefresh({ ...initial, name: "idle" }, refresh);
+        if (restartStates.has(refresh?.lastResult?.status ?? "") || refresh?.pendingRestart === true) {
+          return [{ ...base, name: "pendingRestart", result: refresh.lastResult }, null];
         }
-        // 干净水合：catalogWritable / catalogMode 随 /status 落态。desktop asar 只读
-        // 形态下 catalogWritable=false 且 catalogMode="registry"（ADR 0003：刷新走
-        // 进程内目录注册表注入，入口保持可用且无需重启）；旧宿主不携带这两个字段时
-        // 保持现值不回退（不回退为"可写"，避免误导）。
-        const writable = refresh && "catalogWritable" in refresh ? refresh.catalogWritable : state.catalogWritable ?? null;
-        const mode = refresh && "catalogMode" in refresh ? refresh.catalogMode : state.catalogMode ?? null;
-        return [{ ...state, catalogWritable: writable, catalogMode: mode }, null];
+        const st = refresh?.lastResult?.status;
+        if (st && ["recovery-needed", "rollback-conflict", "conflict", "partial", "rolled-back", "intent-retired", "applied"].includes(st)) {
+          return [{ ...base, name: "result", result: refresh.lastResult }, null];
+        }
+        if (refresh?.activeOperation) return [{ ...base, name: "busy", active: refresh.activeOperation }, null];
+        return [base, null];
       }
       return [state, null];
     }
     case "previewing": {
       if (event.type === "preview-ok") {
-        return [{ name: "confirming", preview: event.preview, mode: state.mode, staleNotice: state.stale === true }, null];
+        return [{ name: "confirming", flags: state.flags ?? initial.flags, preview: event.preview, staleNotice: state.stale === true }, null];
       }
-      if (event.type === "preview-fail") return [{ name: "failed", error: event.error }, null];
-      return [state, null]; // previewing 期间忽略 start 等重复事件
+      if (event.type === "preview-fail") return [{ name: "failed", flags: state.flags ?? initial.flags, error: event.error }, null];
+      return [state, null];
     }
     case "confirming": {
+      const p = state.preview;
+      if (event.type === "select") {
+        // 选择变化：从原快照 materialize（服务端重算，沿用原有效期，不重新取数）
+        return [{
+          name: "previewing",
+          flags: state.flags ?? initial.flags,
+          operation: p.operation,
+          catalogSource: p.catalogSource,
+          stale: false,
+        }, {
+          type: "preview",
+          operation: p.operation,
+          catalogSource: p.catalogSource,
+          basePreviewId: p.previewId,
+          selectedIds: event.selectedIds ?? [],
+          confirmEmpty: event.confirmEmpty === true,
+        }];
+      }
       if (event.type === "start") {
-        // catalogSource==="local" 时弹窗提供「改用内置覆盖层预览」：
-        // 发 mode:"overlay" 的新 preview（不直接 apply，R2-5），新 diff 需再次确认
-        return [{ name: "previewing", mode: event.mode, stale: false }, { type: "preview", mode: event.mode }];
+        // 显式切源（overlay/local）或切换操作：生成全新预览（不隐式降级，Q7）
+        return [{
+          name: "previewing",
+          operation: event.operation === "rebuild" ? "rebuild" : p.operation,
+          catalogSource: event.catalogSource,
+          stale: false,
+        }, {
+          type: "preview",
+          operation: event.operation === "rebuild" ? "rebuild" : p.operation,
+          catalogSource: event.catalogSource,
+        }];
       }
       if (event.type === "confirm") {
-        return [
-          { name: "applying", mode: state.mode, digests: state.preview.digests },
-          { type: "apply", mode: state.mode, digests: state.preview.digests },
-        ];
+        const isRebuild = p.operation === "rebuild";
+        const emptyTarget = isRebuild && (p.diff?.targetView?.models ?? []).length === 0;
+        if (isRebuild && event.second !== true) return [state, null]; // 重建需二次确认
+        if (emptyTarget && event.empty !== true) return [state, null]; // 清空需单独确认
+        if (p.evidence?.stale === true) return [state, null]; // stale 证据不可应用（Q7）
+        return [{ name: "applying", flags: state.flags ?? initial.flags, preview: p }, { type: "apply", previewId: p.previewId, operationId: p.operationId }];
       }
-      if (event.type === "cancel") return [initial, null];
+      if (event.type === "cancel") return [{ ...initial, flags: state.flags ?? initial.flags, lastResult: state.lastResult ?? null }, null];
       return [state, null];
     }
     case "applying": {
-      // apply-ok 携带 restartRequired / mode（ADR 0003）：registry 通道当次生效，
-      // 不要求重启；file 通道仍是两阶段（下个 boot 同步 settings）。
       if (event.type === "apply-ok") {
-        return event.restartRequired === false
-          ? [{ name: "applied", mode: event.mode ?? null, injected: event.injected ?? 0 }, null]
-          : [{ name: "restartNeeded", catalogMode: state.catalogMode ?? null }, null];
+        return restartStates.has(event.result?.status ?? "")
+          ? [{ ...state, name: "pendingRestart", result: event.result }, null]
+          : [{ ...state, name: "result", result: event.result }, null];
       }
       if (event.type === "apply-stale") {
-        // 409 preview-stale：以原 mode 重新 preview（保持 overlay 来源，R2-5）
-        return [{ name: "previewing", mode: state.mode, stale: true }, { type: "preview", mode: state.mode }];
+        // 预览过期/配置漂移/授权变化 → 自动重新预览（保持操作与来源）
+        return [{
+          name: "previewing",
+          flags: state.flags ?? initial.flags,
+          operation: state.preview.operation,
+          catalogSource: state.preview.catalogSource,
+          stale: true,
+        }, { type: "preview", operation: state.preview.operation, catalogSource: state.preview.catalogSource }];
       }
-      if (event.type === "apply-fail") return [{ name: "failed", error: event.error }, null];
-      return [state, null]; // applying 态忽略 confirm/start（双击只发一次）
+      if (event.type === "apply-busy") {
+        return [{ ...state, name: "checking" }, { type: "status" }];
+      }
+      if (event.type === "apply-unknown") {
+        return [{ ...state, name: "checking", operationId: state.preview.operationId }, { type: "statusQuery", operationId: state.preview.operationId }];
+      }
+      if (event.type === "apply-fail") return [{ ...state, name: "failed", error: event.error }, null];
+      return [state, null];
+    }
+    case "checking": {
+      if (event.type === "query-result") {
+        if (event.query === "active") return [{ ...state, name: "busy", active: event.active }, null];
+        if (event.query === "last") {
+          return restartStates.has(event.lastResult?.status ?? "")
+            ? [{ ...state, name: "pendingRestart", result: event.lastResult }, null]
+            : [{ ...state, name: "result", result: event.lastResult }, null];
+        }
+        return [{ ...state, name: "resultUnknown", operationId: state.operationId }, null];
+      }
+      if (event.type === "hydrate") {
+        const refresh = event.status?.refresh;
+        if (refresh?.activeOperation) return [{ ...state, name: "busy", active: refresh.activeOperation }, null];
+        if (refresh?.lastResult) return [{ ...state, name: "result", result: refresh.lastResult }, null];
+        return [{ ...state, name: "resultUnknown", operationId: state.operationId }, null];
+      }
+      return [state, null];
+    }
+    case "retireConfirm": {
+      if (event.type === "retire-confirm") {
+        return [{ name: "retiring", operationId: state.result?.operationId, result: state.result }, { type: "retire", operationId: state.result?.operationId }];
+      }
+      if (event.type === "cancel") return [{ name: "result", result: state.result }, null];
+      return [state, null];
+    }
+    case "retiring": {
+      if (event.type === "retire-ok") return [{ ...state, name: "checking" }, { type: "status" }];
+      if (event.type === "retire-fail") return [{ name: "result", result: state.result, retireError: event.error }, null];
+      return [state, null];
     }
     default:
       return [state, null];
   }
 }
 
-// 副作用执行器：effect → 结果事件。只经注入的 fetchImpl 发请求。
+// 副作用执行器：effect → 结果事件。只经注入的 fetchImpl；错误经 requestJson 脱敏。
 export async function runEffect(effect, fetchImpl) {
   const r = routes();
-  const post = (url, body) =>
-    fetchImpl(url, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
+  const post = (url, body) => requestJson(fetchImpl, url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ...body }),
+  });
   if (effect.type === "preview") {
-    try {
-      const res = await post(r.refreshPreview, effect.mode ? { mode: effect.mode } : {});
-      const body = await res.json();
-      return res.status === 200 && body?.ok
-        ? { type: "preview-ok", preview: body }
-        : { type: "preview-fail", error: body?.error ?? `HTTP ${res.status}` };
-    } catch (err) {
-      return { type: "preview-fail", error: String(err?.message ?? err) };
-    }
+    const res = await post(r.refreshPreview, {
+      operation: effect.operation,
+      ...(effect.catalogSource ? { catalogSource: effect.catalogSource } : {}),
+      ...(effect.basePreviewId ? { basePreviewId: effect.basePreviewId, selectedIds: effect.selectedIds ?? [] } : {}),
+      ...(effect.confirmEmpty ? { confirmEmpty: true } : {}),
+    });
+    if (res.ok) return { type: "preview-ok", preview: res.body };
+    return { type: "preview-fail", error: res.error?.details?.errorCode ?? res.error?.messageKey };
   }
   if (effect.type === "apply") {
-    try {
-      const res = await post(r.refreshApply, {
-        digests: effect.digests,
-        ...(effect.mode ? { mode: effect.mode } : {}),
-      });
-      const body = await res.json().catch(() => null);
-      if (res.status === 409) return { type: "apply-stale" };
-      return res.status === 200 && body?.ok
-        ? {
-            type: "apply-ok",
-            restartRequired: body.restartRequired !== false,
-            mode: body.mode ?? null,
-            injected: Array.isArray(body.injected) ? body.injected.length : 0,
-          }
-        : { type: "apply-fail", error: body?.error ?? `HTTP ${res.status}` };
-    } catch (err) {
-      return { type: "apply-fail", error: String(err?.message ?? err) };
+    const res = await post(r.refreshApply, { previewId: effect.previewId, operationId: effect.operationId });
+    if (res.ok) return { type: "apply-ok", result: res.body?.result ?? { status: "unknown" } };
+    const code = res.error?.details?.errorCode ?? "";
+    const status = res.httpStatus;
+    if (status === null) return { type: "apply-unknown" }; // 网络不明：先查同 operationId，绝不换 ID 重发
+    if (status === 423 || code === "resource-busy") return { type: "apply-busy" };
+    if (status === 409 && ["preview-stale", "auth-changed", "preview-invalid"].includes(code)) {
+      return { type: "apply-stale", error: code };
     }
+    return { type: "apply-fail", error: code || res.error?.messageKey };
+  }
+  if (effect.type === "retire") {
+    const res = await post(r.refreshRetire, { operationId: effect.operationId });
+    if (res.ok) return { type: "retire-ok", result: res.body?.result ?? null };
+    return { type: "retire-fail", error: res.error?.details?.errorCode ?? res.error?.messageKey };
   }
   if (effect.type === "status") {
-    try {
-      const res = await fetchImpl(r.status);
-      return { type: "hydrate", status: await res.json() };
-    } catch {
-      return { type: "hydrate", status: null };
+    const res = await requestJson(fetchImpl, r.status, { method: "GET" });
+    if (res.ok) return { type: "hydrate", status: res.body };
+    return { type: "hydrate", status: null };
+  }
+  if (effect.type === "statusQuery") {
+    const res = await requestJson(fetchImpl, `${r.status}?operationId=${encodeURIComponent(effect.operationId ?? "")}`, { method: "GET" });
+    if (res.ok && res.body?.operation) {
+      return { type: "query-result", query: res.body.operation.query, active: res.body.operation.active, lastResult: res.body.operation.lastResult };
     }
+    return { type: "query-result", query: "unknown" };
   }
   throw new Error(`unknown effect: ${effect.type}`);
 }
 
 // controller：reduce → 执行 effect → 结果事件回送 reduce → 循环至无 effect。
-// client.jsx 必须只经 advance 驱动状态机，不直接调 reduce/runEffect。
-// onState 在每个 reduce 步同步回调（含 effect 执行前）——UI 借此即时落中间态
-// （applying 期间重复 confirm 被 reducer 忽略，双击只发一次）。
 export async function advance(state, event, fetchImpl, onState) {
   let [s, fx] = reduce(state, event);
   onState?.(s);
+  let guard = 0;
   while (fx) {
+    if (guard++ > 8) throw new Error("effect loop guard");
     const resultEvent = await runEffect(fx, fetchImpl);
     [s, fx] = reduce(s, resultEvent);
     onState?.(s);

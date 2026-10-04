@@ -40,38 +40,59 @@ const DICTS = {
     copy: "Copy",
     copied: "Copied ✓",
     unknown: "Unknown error",
-    refreshNow: "Refresh model catalog",
-    refreshTitle: "Refresh available model catalog",
-    refreshDesc: "This pulls your account's available models and the latest pi-ai catalog data, then applies a data-level, add-only patch to the local catalog (pi-ai version stays unchanged). Review the diff before confirming.",
-    riskRemoved: "Models no longer available to your account will DISAPPEAR from the model list after restart.",
-    riskReset: "Your customizations (trimmed model list, per-model field tweaks, modelOverrides) will be RESET to the mirrored set.",
-    riskRestart: "Takes effect only after a dsh web restart (two-phase: catalog patch now, settings sync on next boot).",
-    addedModels: "New models",
-    removedModels: "Removed (no longer available)",
+    // ---- Model management (protocol v2, design §5) ----
+    supplement: "Add models",
+    rebuild: "Rebuild model list",
+    supplementTitle: "Add models",
+    rebuildTitle: "Rebuild model list",
+    candidates: "Models available to add",
+    selectAll: "Select all",
+    supplementRisk: "Existing models and customizations will be kept. Only selected models will be added.",
+    rebuildRisk: "This rebuilds Copilot model configuration from the verified account list and clears the model customizations below. Other provider settings remain unchanged.",
+    clearRisk: "This clears the Copilot model list and its model customizations. Confirm clearing separately.",
+    secondConfirm: "This is destructive. Click again to confirm.",
+    applyChanges: "Apply changes",
+    addedModels: "Models to add",
+    removedModels: "Models to be removed",
     keptModels: "Kept",
+    removedAccount: "Not included in this account model list",
+    removedUnresolvable: "Not resolvable by the current catalog",
+    warnings: "Warnings",
     skippedModels: "Upstream entries skipped by validation",
-    customReset: "These customizations will be reset:",
-    customEntries: "field tweaks",
-    customOverrides: "modelOverrides",
-    confirmRefresh: "Confirm refresh",
-    cancel: "Cancel",
-    refreshing: "Fetching preview…",
-    applying: "Applying…",
-    restartNeeded: "Catalog patched. Restart dsh web to finish syncing the model list.",
-    stalePreview: "Inputs changed — review the new diff",
-    overlayBtn: "Preview with bundled overlay",
-    stateCorrupt: "State file was corrupted and quarantined; auto self-heal is disabled — run a refresh to re-activate.",
-    srcLive: "Account models: live fetch",
-    srcCache: "Account models: credential cache (live fetch failed)",
+    srcLive: "Account models: live",
+    srcCache: "Account models: cached at {time}; add-only use",
+    srcStale: "The cache has no trusted timestamp, is expired, or belongs to changed authorization; reference only.",
     srcLatest: "Catalog source: latest pi-ai from npm",
-    srcLocal: "Catalog source: local only (npm fetch failed)",
+    srcLocal: "Catalog source: local (npm fetch failed)",
     srcOverlay: "Catalog source: bundled overlay (offline bootstrap)",
+    overlayBtn: "Preview with bundled overlay",
+    previewStale: "Configuration or data changed. Preview and confirm again.",
     none: "(none)",
-    notWritable: "This DSH installation packages the model catalog read-only (inside app.asar) — the refresh cannot be written. Use a web/service deployment for catalog refresh, or wait for a desktop build that unpacks pi-ai.",
-    registryMode: "This installation's app.asar is read-only, so the refresh does not write the catalog file: new entries are injected into the running catalog registry instead. No restart needed.",
-    registryApplied: "Injected %s new model(s) into the running catalog — live now. The boot sequence replays them after a restart.",
-    registryFailed: "Catalog registry injection failed — nothing was written and your model list was left unchanged.",
-    riskImmediate: "Takes effect immediately in this process (registry injection); the boot sequence replays it after a restart.",
+    applying: "Applying…",
+    refreshing: "Fetching preview…",
+    cancel: "Cancel",
+    applied: "Changes are active. No restart is needed.",
+    pendingRestart: "Changes are saved and require restarting this instance's service or application. Refreshing the page alone is not enough.",
+    conflict: "Configuration changed. To protect your edits, preview and confirm again.",
+    partial: "Changes were only partially applied. Review the current status and recovery guidance.",
+    rolledBack: "This operation's model configuration changes were rolled back. Catalog data may still have been added.",
+    rollbackConflict: "Newer configuration was detected and preserved. Automatic rollback did not complete.",
+    busy: "Another operation is using this resource. Please retry shortly.",
+    unknownResult: "Completion has not been confirmed. Check the current status before submitting again.",
+    recoveryNeeded: "A previous configuration intent is stale or conflicted. End it before applying new changes.",
+    retireBtn: "End previous configuration intent",
+    retireTitle: "End previous configuration intent",
+    retireConfirmText: "End the intent only; existing changes are not rolled back or undone.",
+    legacy: "Legacy shared recovery state was found. It will not be applied automatically; preview and confirm in this profile.",
+    unavailable: "This runtime lacks the capabilities needed to apply changes safely.",
+    techDetails: "Technical details",
+    stateCorrupt: "State file was corrupted and quarantined. Preview and confirm again.",
+    blockedReasons: {
+      "readonly-install": "The model catalog is packaged read-only in this installation.",
+      "inject-unavailable": "The in-process catalog registry is unavailable in this installation.",
+      "instance-mismatch": "Two module instances were detected; injection cannot be verified.",
+      "install-unresolved": "The pi-ai installation could not be located.",
+    },
   },
   zh: {
     nav: "GHC设置",
@@ -100,52 +121,76 @@ const DICTS = {
     copy: "复制",
     copied: "已复制 ✓",
     unknown: "未知错误",
-    refreshNow: "刷新可用模型目录",
-    refreshTitle: "刷新可用模型目录",
-    refreshDesc: "将现场拉取账号可用模型与最新 pi-ai 目录数据，对本机目录做数据级只增补丁（pi-ai 版本不变）。确认前请核对下方差异。",
-    riskRemoved: "失效模型（账号已不再可用的模型）重启后将从模型列表消失。",
-    riskReset: "你的定制（精简裁剪、条目字段微调、modelOverrides）将被重置为镜像集合。",
-    riskRestart: "需重启 dsh web 后生效（两阶段：现在写目录补丁，下个 boot 同步 settings）。",
-    addedModels: "新增模型",
-    removedModels: "移除（已失效）",
+    // ---- 模型管理（协议 v2，设计§5） ----
+    supplement: "补充模型",
+    rebuild: "重建模型列表",
+    supplementTitle: "补充模型",
+    rebuildTitle: "重建模型列表",
+    candidates: "可新增的模型",
+    selectAll: "全选",
+    supplementRisk: "将保留现有模型及定制，只添加你勾选的模型。",
+    rebuildRisk: "将按本次可信账号列表重建 Copilot 模型配置，并清除下列模型参数与覆盖配置。其他提供方设置不变。",
+    clearRisk: "本次将清空 Copilot 模型列表并清除其模型定制。请单独确认清空。",
+    secondConfirm: "此操作具有破坏性，请再次点击确认。",
+    applyChanges: "应用更改",
+    addedModels: "将添加的模型",
+    removedModels: "将移除的模型",
     keptModels: "保留",
+    removedAccount: "未包含在本次账号模型列表",
+    removedUnresolvable: "当前目录无法解析",
+    warnings: "警告",
     skippedModels: "被校验跳过的上游条目",
-    customReset: "以下定制将被重置：",
-    customEntries: "字段微调",
-    customOverrides: "modelOverrides",
-    confirmRefresh: "确认刷新",
-    cancel: "取消",
-    refreshing: "拉取预览中…",
-    applying: "应用中…",
-    restartNeeded: "目录补丁已写入。重启 dsh web 后完成模型列表同步。",
-    stalePreview: "数据已变化，请重新确认差异",
-    overlayBtn: "改用内置覆盖层预览",
-    stateCorrupt: "状态文件已损坏并被隔离；自动自愈已停用，请重新执行一次刷新以激活。",
-    srcLive: "账号模型：现场拉取",
-    srcCache: "账号模型：凭证缓存（现场拉取失败）",
+    srcLive: "账号模型：实时获取",
+    srcCache: "账号模型：缓存，获取于 {time}，仅可用于补充",
+    srcStale: "缓存缺少可信时间、已过期或授权已变化，仅供参考。",
     srcLatest: "目录来源：npm 最新 pi-ai",
-    srcLocal: "目录来源：仅本地目录（npm 拉取失败）",
+    srcLocal: "目录来源：本地目录（npm 拉取失败）",
     srcOverlay: "目录来源：内置覆盖层（离线 bootstrap）",
+    overlayBtn: "改用内置目录数据预览",
+    previewStale: "配置或数据已变化，请重新预览并确认。",
     none: "（无）",
-    notWritable: "当前 DSH 安装把模型目录打包在只读的 app.asar 内，刷新无法写入。请在 Web/服务部署形态下刷新目录，或等待桌面版提供可写布局后重试。",
-    registryMode: "当前安装的 app.asar 只读，刷新不写目录文件：新条目直接注入运行中的目录注册表。无需重启。",
-    registryApplied: "已向运行中的目录注入 %s 个新模型——即刻生效；重启后由启动序列自动重放。",
-    registryFailed: "目录注册表注入失败——未写入任何内容，模型列表保持原样。",
-    riskImmediate: "本进程内即刻生效（注册表注入）；重启后由启动序列自动重放。",
+    applying: "应用中…",
+    refreshing: "拉取预览中…",
+    cancel: "取消",
+    applied: "更改已生效，无需重启。",
+    pendingRestart: "更改已保存，待重启生效。请重启运行此实例的服务或应用；仅刷新页面不会生效。",
+    conflict: "配置已变化。为保护你的修改，请重新预览并确认。",
+    partial: "更改未完全应用，请查看当前状态和恢复建议。",
+    rolledBack: "本次模型配置更改已回滚。目录数据可能仍已补充。",
+    rollbackConflict: "检测到更新的配置，已保留你的修改；自动回滚未完成。",
+    busy: "另一个操作正在处理此资源，请稍后重试。",
+    unknownResult: "尚未确认操作完成。请核实当前状态，勿重复提交。",
+    recoveryNeeded: "存在已失效或冲突的旧配置意图，请先结束旧意图再应用新更改。",
+    retireBtn: "结束旧配置意图",
+    retireTitle: "结束旧配置意图",
+    retireConfirmText: "只结束旧意图，不回滚或撤销已发生的更改。",
+    legacy: "检测到旧的共享恢复状态。不会自动应用，请在当前 profile 重新预览确认。",
+    unavailable: "当前运行时缺少安全应用所需的能力，暂不能应用更改。",
+    techDetails: "技术详情",
+    stateCorrupt: "恢复状态无法读取，原件已保留。请重新预览确认。",
+    blockedReasons: {
+      "readonly-install": "当前安装把模型目录打包为只读。",
+      "inject-unavailable": "当前安装的进程内目录注册表不可用。",
+      "instance-mismatch": "检测到两份模块实例，注入无法核实。",
+      "install-unresolved": "无法定位 pi-ai 安装。",
+    },
   },
 };
 
 const NAV_TEXTS = Object.keys(DICTS).map((locale) => DICTS[locale].nav);
 
-// 落地通道判定（ADR 0003）：只读安装树 + catalogMode==="registry" = 刷新可用
-// （走进程内目录注册表注入，无需重启）；"不可写且无替代通道"（旧宿主 / 注入面
-// 不可用）才置灰入口。两个判据必须分开，否则 desktop 上会继续误置灰。
-function isRegistryMode(flags) {
-  return flags?.catalogWritable === false && flags?.catalogMode === "registry";
+// 通道门控（协议 v2，T10 status refresh 块）：catalogMode ∈ file/registry/blocked/unknown。
+// file/registry 可操作；blocked/unknown 不承诺可应用 → 置灰入口并按 blockedReason 说明
+//（G02／设计§4.3「未知不承诺可应用」「按实际原因解释」）。
+function refreshBlocked(flags) {
+  const mode = flags?.catalogMode;
+  return flags?.scopeAvailable === false || mode === "blocked" || mode === "unknown";
 }
 
-function refreshBlocked(flags) {
-  return flags?.catalogWritable === false && flags?.catalogMode !== "registry";
+function blockedReasonText(t, flags) {
+  const reason = flags?.blockedReason;
+  if (reason && t("blockedReasons")?.[reason]) return t("blockedReasons")[reason];
+  return t("unavailable");
 }
 
 // octicons copilot-16（MIT，github/primer）——单色 currentColor，随主题变色
@@ -246,78 +291,145 @@ function sampleThemeSurface() {
   return { bg, fg: cs.color || "inherit" };
 }
 
-// 刷新弹窗：消费 refresh-flow 状态机的 confirming 态（preview 数据）。
-// 渲染 added（绿）/removed（红）/kept 计数/skipped（黄，如有）/customizationReset
-// 名单/source 提示/三条风险文案；catalogSource==="local" 时展示 overlayBtn
-//（点击 = 发 mode:"overlay" 的新 preview，不直接 apply，R2-5）。
-function RefreshModal({ t, flow, onConfirm, onCancel, onOverlay }) {
+// 模型操作弹窗（协议 v2，T11）：补充（候选勾选，默认全不选）／重建（二次确认，
+// 空目标单独确认）。选择变化经 onSelect → 服务端从原快照 materialize（不重新取数）；
+// stale 证据只展示参考且禁用应用（Q7）；危险确认阶段初始焦点在取消、可取消阶段
+// Esc 等价取消（设计§5）；技术详情默认折叠（G04）。
+function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
   const p = flow.preview;
+  const diff = p.diff ?? {};
+  const isRebuild = p.operation === "rebuild";
+  const emptyTarget = isRebuild && (diff.targetView?.models ?? []).length === 0;
+  const candidates = diff.candidates ?? [];
+  const selectedIds = new Set(diff.added ?? []);
+  const [stage, setStage] = useState(0); // 0 常规｜1 已警示待二次确认｜2 已警示待清空确认
+  const cancelRef = useRef(null);
   const surface = useRef(null);
   if (!surface.current) surface.current = sampleThemeSurface();
-  const sourceKeys = [
-    p.source === "live" ? "srcLive" : "srcCache",
-    p.catalogSource === "latest" ? "srcLatest" : p.catalogSource === "overlay" ? "srcOverlay" : "srcLocal",
-  ];
-  const list = (ids, style) =>
-    ids.length === 0 ? <span style={{ opacity: 0.6 }}>{t("none")}</span> : (
+  useEffect(() => {
+    setStage(0); // 预览/选择变化重置确认（设计§4.2：漂移必再确认）
+  }, [p.previewId]);
+  useEffect(() => {
+    if (stage > 0) cancelRef.current?.focus(); // 危险确认初始焦点在取消（设计§5）
+  }, [stage]);
+  const escCancel = (e) => {
+    if (e.key === "Escape") onCancel(); // 可取消阶段 Esc 等价取消
+  };
+  const confirmClick = () => {
+    if (p.evidence?.stale === true) return; // reducer 双保险
+    if (!isRebuild) { onConfirm({ second: false, empty: false }); return; }
+    if (stage === 0) { setStage(1); return; }
+    if (emptyTarget && stage === 1) { setStage(2); return; }
+    onConfirm({ second: true, empty: emptyTarget });
+  };
+  const sourceLine = [
+    p.evidence?.source === "live" ? t("srcLive")
+      : p.evidence?.source === "cache" ? t("srcCache").replace("{time}", String(p.evidence?.fetchedAt ?? "")) : null,
+    p.catalogSource === "latest" ? t("srcLatest") : p.catalogSource === "overlay" ? t("srcOverlay") : t("srcLocal"),
+  ].filter(Boolean).join(" · ");
+  const list = (items, style, render) =>
+    items.length === 0 ? <span style={{ opacity: 0.6 }}>{t("none")}</span> : (
       <ul style={styles.diffList}>
-        {ids.map((id) => <li key={id} style={{ ...style, ...styles.mono }}>{id}</li>)}
+        {items.map((x, i) => <li key={x?.id ?? x ?? i} style={{ ...style, ...styles.mono }}>{render ? render(x) : x}</li>)}
       </ul>
     );
-  const resets = [
-    ...p.customizationReset.modelEntryIds.map((id) => `${id} (${t("customEntries")})`),
-    ...p.customizationReset.modelOverrideIds.map((id) => `${id} (${t("customOverrides")})`),
-  ];
   return (
-    <div style={styles.modalMask} role="dialog" aria-modal="true">
+    <div style={styles.modalMask} role="dialog" aria-modal="true" onKeyDown={escCancel}>
       <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg }}>
-        <h4 style={styles.modalTitle}>{t("refreshTitle")}</h4>
-        <p style={styles.modalText}>{t("refreshDesc")}</p>
-        {flow.staleNotice && <p style={styles.banner}>⚠ {t("stalePreview")}</p>}
-        <p style={styles.modalText}>{sourceKeys.map((k) => t(k)).join(" · ")}</p>
-        <p style={styles.modalText}><strong>{t("addedModels")}</strong>（{p.added.length}）</p>
-        {list(p.added, styles.added)}
-        <p style={styles.modalText}><strong>{t("removedModels")}</strong>（{p.removed.length}）</p>
-        {list(p.removed, styles.removed)}
-        <p style={styles.modalText}><strong>{t("keptModels")}</strong>（{p.kept.length}）</p>
-        {p.skipped.length > 0 && (
+        <h4 style={styles.modalTitle}>{t(isRebuild ? "rebuildTitle" : "supplementTitle")}</h4>
+        {flow.staleNotice && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
+        <p style={styles.modalText}>{sourceLine}</p>
+        {p.evidence?.stale === true && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
+        {!isRebuild && (
           <>
-            <p style={styles.modalText}><strong>{t("skippedModels")}</strong>（{p.skipped.length}）</p>
+            <p style={styles.modalText}>
+              <strong>{t("candidates")}</strong>（{candidates.length}）
+              {candidates.length > 0 && (
+                <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, marginLeft: 10, fontSize: 12 }} onClick={() => onSelect(candidates)}>
+                  {t("selectAll")}
+                </button>
+              )}
+            </p>
+            {list(candidates, styles.added, (id) => (
+              <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input type="checkbox" checked={selectedIds.has(id)} onChange={() => {
+                  const next = new Set(selectedIds);
+                  if (next.has(id)) next.delete(id);
+                  else next.add(id);
+                  onSelect([...next]);
+                }} />
+                <span>{id}</span>
+              </label>
+            ))}
+            <p style={styles.risk}>⚠ {t("supplementRisk")}</p>
+          </>
+        )}
+        <p style={styles.modalText}><strong>{t("addedModels")}</strong>（{(diff.added ?? []).length}）</p>
+        {list(diff.added ?? [], styles.added)}
+        <p style={styles.modalText}><strong>{t("removedModels")}</strong>（{(diff.removed ?? []).length}）</p>
+        {list(diff.removed ?? [], styles.removed, (x) => `${x.id} — ${t(x.reason === "unresolvable" ? "removedUnresolvable" : "removedAccount")}`)}
+        <p style={styles.modalText}><strong>{t("keptModels")}</strong>（{(diff.kept ?? []).length}）</p>
+        {(diff.warnings ?? []).length > 0 && (
+          <>
+            <p style={styles.modalText}><strong>{t("warnings")}</strong>（{diff.warnings.length}）</p>
+            {list(diff.warnings, styles.skipped, (w) => `${w.id ?? ""} — ${w.reason ?? ""}`)}
+          </>
+        )}
+        {isRebuild && <p style={styles.risk}>⚠ {t("rebuildRisk")}</p>}
+        {emptyTarget && stage >= 1 && <p style={styles.risk}>⚠ {t("clearRisk")}</p>}
+        {stage === 1 && !emptyTarget && <p style={styles.risk}>⚠ {t("secondConfirm")}</p>}
+        {(p.skipped ?? []).length > 0 && (
+          <details style={styles.modalText}>
+            <summary>{t("skippedModels")}（{p.skipped.length}）</summary>
             <ul style={styles.diffList}>
               {p.skipped.map((s) => <li key={s.id} style={styles.skipped}>{s.id} — {s.reason}</li>)}
             </ul>
-          </>
+          </details>
         )}
-        {resets.length > 0 && (
-          <>
-            <p style={styles.modalText}><strong>{t("customReset")}</strong></p>
-            <ul style={styles.diffList}>
-              {resets.map((x) => <li key={x} style={styles.skipped}>{x}</li>)}
-            </ul>
-          </>
+        {p.catalogError && (
+          <details style={styles.modalText}>
+            <summary>{t("techDetails")}</summary>
+            <span style={{ ...styles.mono, fontSize: 12 }}>{p.catalogError}</span>
+          </details>
         )}
-        <p style={styles.risk}>⚠ {t("riskRemoved")}</p>
-        <p style={styles.risk}>⚠ {t("riskReset")}</p>
-        {isRegistryMode(p)
-          ? <p style={styles.modalText}>{t("riskImmediate")}</p>
-          : <p style={styles.risk}>⚠ {t("riskRestart")}</p>}
-        {isRegistryMode(p) && <p style={styles.banner}>ⓘ {t("registryMode")}</p>}
-        {refreshBlocked(p) && <p style={styles.error}>⚠ {t("notWritable")}</p>}
         <div style={styles.modalActions}>
           {p.catalogSource === "local" && (
             <button type="button" style={{ ...styles.button, ...styles.secondary, marginRight: "auto" }} onClick={onOverlay}>
               {t("overlayBtn")}
             </button>
           )}
-          <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
+          <button ref={cancelRef} type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
           <button
             type="button"
-            style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(p) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-            disabled={refreshBlocked(p)}
-            onClick={onConfirm}
+            style={{ ...styles.button, ...styles.primary, ...((p.evidence?.stale === true) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+            disabled={p.evidence?.stale === true}
+            onClick={confirmClick}
           >
-            {t("confirmRefresh")}
+            {t("applyChanges")}
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 「结束旧配置意图」确认弹窗（T11/B17b 简化版）：默认焦点在取消；Esc 取消；
+// 只结束旧意图，不回滚或撤销已发生的更改。
+function RetireDialog({ t, onConfirm, onCancel }) {
+  const cancelRef = useRef(null);
+  const surface = useRef(null);
+  if (!surface.current) surface.current = sampleThemeSurface();
+  useEffect(() => {
+    cancelRef.current?.focus();
+  }, []);
+  return (
+    <div style={styles.modalMask} role="dialog" aria-modal="true" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
+      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, maxWidth: 420 }}>
+        <h4 style={styles.modalTitle}>{t("retireTitle")}</h4>
+        <p style={styles.modalText}>{t("retireConfirmText")}</p>
+        <div style={styles.modalActions}>
+          <button ref={cancelRef} type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
+          <button type="button" style={{ ...styles.button, ...styles.primary }} onClick={onConfirm}>{t("retireBtn")}</button>
         </div>
       </div>
     </div>
@@ -447,46 +559,112 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
       )}
       {phase === "failed" && attempt?.error && <p style={styles.error}>{attempt.error}</p>}
       {phase === "authorized" && (
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          {/* 退出/重新授权：当前宿主无法证明安全（D-01），统一禁用并说明 */}
-          <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("authUnsafe")}>{t("logout")}</button>
-          <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("authUnsafe")}>{t("reauthorize")}</button>
-          <button
-            type="button"
-            style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(flow) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-            disabled={refreshBlocked(flow) || flow.name === "previewing" || flow.name === "applying"}
-            onClick={() => drive({ type: "start" })}
-          >
-            {flow.name === "previewing" ? t("refreshing") : flow.name === "applying" ? t("applying") : t("refreshNow")}
-          </button>
+        <div style={styles.card}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            {/* 退出/重新授权：当前宿主无法证明安全（D-01），统一禁用并说明 */}
+            <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("authUnsafe")}>{t("logout")}</button>
+            <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("authUnsafe")}>{t("reauthorize")}</button>
+            {(["previewing", "applying", "checking", "retiring"].includes(flow.name)) ? (
+              <button type="button" style={{ ...styles.button, ...styles.primary, opacity: 0.5 }} disabled>
+                {flow.name === "applying" ? t("applying") : t("refreshing")}
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(flow.flags) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+                  disabled={refreshBlocked(flow.flags)}
+                  onClick={() => drive({ type: "start", operation: "supplement" })}
+                >
+                  {t("supplement")}
+                </button>
+                <button
+                  type="button"
+                  style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(flow.flags) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+                  disabled={refreshBlocked(flow.flags)}
+                  onClick={() => drive({ type: "start", operation: "rebuild" })}
+                >
+                  {t("rebuild")}
+                </button>
+              </>
+            )}
+          </div>
+          <p style={styles.banner}>ⓘ {t("authUnsafe")}</p>
+          {refreshBlocked(flow.flags) && (
+            <p style={styles.banner}>⚠ {blockedReasonText(t, flow.flags)}</p>
+          )}
+          {flow.flags?.legacyStateDetected && (
+            <p style={styles.banner}>ⓘ {t("legacy")}</p>
+          )}
+          {flow.name === "pendingRestart" && (
+            <p style={styles.banner}>⚠ {t("pendingRestart")}</p>
+          )}
+          {flow.name === "busy" && (
+            <p style={styles.banner}>ⓘ {t("busy")}</p>
+          )}
+          {flow.name === "resultUnknown" && (
+            <>
+              <p style={styles.error}>⚠ {t("unknownResult")}</p>
+              <div>
+                <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={() => drive({ type: "check" })}>{t("retryNow")}</button>
+              </div>
+            </>
+          )}
+          {flow.name === "result" && (
+            <div>
+              {(() => {
+                const st = flow.result?.status;
+                const key = {
+                  applied: "applied",
+                  conflict: "conflict",
+                  partial: "partial",
+                  "rolled-back": "rolledBack",
+                  "rollback-conflict": "rollbackConflict",
+                  "recovery-needed": "recoveryNeeded",
+                  "intent-retired": "recoveryNeeded",
+                }[st];
+                return key
+                  ? <p style={st === "applied" ? styles.banner : styles.error}>{st === "applied" ? "✓" : "⚠"} {t(key)}</p>
+                  : null;
+              })()}
+              {["recovery-needed", "rollback-conflict", "intent-retired"].includes(flow.result?.status) && (
+                <div>
+                  <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={() => drive({ type: "retire-request" })}>
+                    {t("retireBtn")}
+                  </button>
+                </div>
+              )}
+              {(flow.result?.error || flow.result?.changes) && (
+                <details style={styles.modalText}>
+                  <summary>{t("techDetails")}</summary>
+                  <span style={{ ...styles.mono, fontSize: 12 }}>
+                    {flow.result?.error ?? ""}
+                    {flow.result?.changes ? ` ${JSON.stringify(flow.result.changes)}` : ""}
+                  </span>
+                </details>
+              )}
+            </div>
+          )}
+          {flow.name === "failed" && (
+            <p style={styles.error}>{flow.error === "state-corrupt" ? t("stateCorrupt") : flow.error}</p>
+          )}
         </div>
-      )}
-      {phase === "authorized" && <p style={styles.banner}>ⓘ {t("authUnsafe")}</p>}
-      {phase === "authorized" && isRegistryMode(flow) && flow.name !== "failed" && (
-        <p style={styles.banner}>ⓘ {t("registryMode")}</p>
-      )}
-      {phase === "authorized" && refreshBlocked(flow) && flow.name !== "failed" && (
-        <p style={styles.banner}>⚠ {t("notWritable")}</p>
-      )}
-      {phase === "authorized" && flow.name === "applied" && (
-        <p style={styles.banner}>{t("registryApplied").replace("%s", String(flow.injected ?? 0))}</p>
-      )}
-      {phase === "authorized" && flow.name === "restartNeeded" && (
-        <p style={styles.banner}>⚠ {t("restartNeeded")}</p>
-      )}
-      {phase === "authorized" && flow.name === "failed" && (
-        <p style={styles.error}>{flow.error === "state-corrupt" ? t("stateCorrupt")
-          : flow.error === "catalog-not-writable" ? t("notWritable")
-          : flow.error === "registry-inject-failed" || flow.error === "registry-not-effective" ? t("registryFailed")
-          : flow.error}</p>
       )}
       {flow.name === "confirming" && (
         <RefreshModal
           t={t}
           flow={flow}
-          onConfirm={() => drive({ type: "confirm" })}
+          onSelect={(selectedIds) => drive({ type: "select", selectedIds })}
+          onConfirm={(opts) => drive({ type: "confirm", ...opts })}
           onCancel={() => drive({ type: "cancel" })}
-          onOverlay={() => drive({ type: "start", mode: "overlay" })}
+          onOverlay={() => drive({ type: "start", catalogSource: "overlay" })}
+        />
+      )}
+      {flow.name === "retireConfirm" && (
+        <RetireDialog
+          t={t}
+          onConfirm={() => drive({ type: "retire-confirm" })}
+          onCancel={() => drive({ type: "cancel" })}
         />
       )}
       {(phase === "idle" || phase === "failed") && (

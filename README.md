@@ -16,13 +16,14 @@
 
 ## 特性
 
-- 🔐 **设备码登录/注销**：网页 + user code，免 API Token；SSO 组织授权友好
+- 🔐 **设备码登录**：网页 + user code，免 API Token；SSO 组织授权友好
+- 🛑 **诚实的授权语义（v2）**：登录进行中可「**请求撤回**」——请求发出后状态如实显示「结果待核实」，不再伪装成已取消；「退出登录/重新授权」在当前宿主无法证明安全结束前**默认禁用并说明**（绝不静默删除凭据）；同一实例只有一个授权尝试，409 时恢复展示共同进度
 - 🧩 **预置提供方路由**：安装即出现在 Models 页，无需手动配置
-- 📦 **模型目录兜底填充**：登录成功时，若 GitHub Copilot 路由还没有模型目录，自动填入账号全部可用模型；你已精简/定制过的目录**永不覆盖**（重启、重新登录均不重置）
-- 🔄 **手动补充新模型目录条目**：GHC 设置页一键刷新——diff 预览 + 二次确认；可写安装树走数据级目录补丁（**pi-ai 版本不动**），**只读安装树（desktop `app.asar`）走进程内目录注册表注入**（ADR 0003：零写盘、无需重启），新模型（如 `gpt-6.1-sol`）即可加入、失效模型镜像移除
+- 📦 **模型目录兜底填充**：登录成功时，若 GitHub Copilot 路由还没有模型目录，自动填入账号全部可用模型；你已精简/定制过的目录**永不覆盖**（重启、重新登录均不重置）；已请求撤回后晚到的授权成功**不会**再写你的配置
+- ➕➖ **补充模型 / 重建模型列表（v2 双入口）**：「补充」默认非破坏——候选模型默认全不勾选，勾选后才加入，现有对象/顺序/modelOverrides 全部保留；「重建」显式确认后按「账号可用 ∩ 目录可解析」重建纯 ID 列表并清空本路由 modelOverrides（二次确认 + 空目标单独确认）。预览快照 10 分钟有效、绑定选择；同一操作幂等可查；配置并发编辑优先受保护
 - 🌐 **中/英双语界面**：跟随 DSH 语言设置自动切换
 - 🔑 **凭据安全托管**：存入 DSH 内置凭据库（文件强制 0600 权限），Copilot 临时 token 到期自动刷新
-- 🧪 **测试与 CI**：140 条单元测试（ubuntu/windows/macos 三平台矩阵）；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
+- 🧪 **测试与 CI**：183 条单元测试（ubuntu/windows/macos 三平台矩阵）；GitHub Actions 构建测试 + tag 触发自动发布（provenance）
 
 ## 前置要求
 
@@ -63,46 +64,52 @@ dsh plugin --profile web add @inventec/dsh-copilot-auth
 4. **SSO 用户必须对组织点 Authorize**（授权页会出现该步骤，跳过则登录不生效）
 5. 回到设置页看到「已登录」即成功；首次登录会自动填充模型目录（已定制过的目录不会被覆盖）
 
-> 设备码有时效（约 15 分钟），请拿到代码后尽快完成授权。若超时，页面会显示失败原因，重新点「登录」即可。
+> 等待有本地时限（约 15 分钟）。若超时，页面显示「等待授权超时，结果仍待核实」——**结果待核实时不能再直接发起新的授权尝试**，请点「查询状态」或人工核实；等待期间也可随时「请求撤回」（同样只承诺请求已发出，结果待核实）。
 
 ## 使用
 
 - Models 页选择 `GitHub Copilot` 路由，模型目录已在首次登录时自动填充账号全部可用模型，无需手动「添加模型」；之后可自由增删精简，重启 / 重新登录都不会重置你的列表
 - **配额说明**：base 模型（GPT-4o/4.1 一类）不耗 premium requests；premium 模型（Claude、Gemini、o 系列等）每次调用消耗月度配额。日常建议 base 档，premium 模型按需手动选
 
-## 注销与卸载
+## 撤回、退出与卸载
 
-- 注销：设置页「注销」按钮（清除本机凭据记录）
+- **请求撤回**：授权等待期间可点「请求撤回」——插件先使本地旧意图失效，再尝试调用宿主撤销接口；无论请求是否送达，状态都如实显示「结果仍待核实」，在结果核实前不能发起新的授权尝试。
+- **退出登录 / 重新授权**：当前宿主桥接无法证明授权流程已安全结束（晚写不可排除），两项操作**默认禁用并说明原因**，插件也绝不调用凭据删除；待宿主提供可信安全路径后再启用。
 - 卸载：`dsh plugin --profile web remove @inventec/dsh-copilot-auth` 后重启 dsh web
 
-## 模型目录刷新
+## 补充模型 / 重建模型列表
 
-pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 gemini-3.8-flash）在本机无法解析、失效模型残留。「刷新可用模型目录」按钮（GHC 设置页，登录后可见）在不升级 pi-ai 的前提下解决这一问题。
+pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型（如 gemini-3.8-flash）在本机无法解析。v2 把旧的单一「刷新」拆成两个明确入口（GHC 设置页，登录后可见），在不升级 pi-ai 的前提下解决目录过期问题。
 
-- **生效时机按落地通道分叉**：可写安装树（web/服务）→ 先对本机 `github-copilot.json` 做原子数据级补丁（pi-ai 代码版本不变），**重启 dsh web 后**插件再把 settings 模型目录镜像重建为「账号可用 ∩ 目录可解析」集合（目录在模块加载时读取，同 boot 内写完目录不会同步 settings）；只读安装树（desktop `app.asar`）→ 进程内注册表注入（ADR 0003），**当次生效、无需重启**。
-- **diff 预览 + 二次确认**：弹窗展示新增（绿）/移除（红）/保留计数、被校验跳过的上游条目、以及**将被重置的定制名单**（字段微调与 modelOverrides）。确认前请核对三条风险：失效模型将消失、你的定制将被重置、需重启后才生效。
-- **激活边界**：插件首次安装/升级后处于未激活态，启动时不触碰 pi-ai 安装树；只有成功执行过一次手动刷新后才激活。DSH 升级冲掉补丁后，已激活实例启动时自愈重放**历史上实际应用过**的补丁条目（内置覆盖层仅作离线数据源，绝不自动应用）。- **数据源与回退**：账号可用模型现场拉取（失败回退凭证缓存）；目录数据从 npm 拉取最新 pi-ai tarball（强制 `dist.integrity` 校验、超时与大小上限、tar 严格解析），失败时可改用内置覆盖层（0.85.1 收割，integrity `sha512-+VgVIJDkDO2efYJKEEqvPTH4zmnIaXdAppGbO+vKFA9qy5PdhFiAenuFAkU+oiCSfOC4dMHDyrjdQeL4ZoC5CQ==`）出 diff。
-- **只增不更新**：合并只补充本机从未见过的模型条目；上游对已有 id 的元数据修正（api 归属、contextWindow 等）不会同步——这是「永不覆盖」语义的代价（ADR 0001）。
-- **digest 绑定**：preview 与 apply 之间以输入 digest（settings 完整配置 / 可用模型 / 本地目录 / 目录来源）绑定，任何漂移即 409 并要求重新预览确认。
-- **可写性门禁（v1.2.4 起，ADR 0002）**：dsh-desktop（Electron）把整个运行时树打包进只读的 `resources/app.asar`，pi-ai 是其中唯一副本——读一切正常、写必被拒。插件在写盘前对目标做可写性分类（asar 路径识别 + 探针文件实测）：不可写时 preview/`/status` 暴露 `catalogWritable:false`，**v1.2.4 起该形态按只读处理**（v1.2.3 及之前会抛 `ENOENT ... not found in ...app.asar` 天书并遗留 prepared journal）。Web/服务部署形态（pi-ai 在真实磁盘）行为不变。
-- **只读安装树的落地通道（v1.2.5 起，ADR 0003）**：只读目标不再意味着"刷新不可用"。写入面换成了 pi-ai 的**进程内目录注册表**（`MODELS["github-copilot"]`，DSH 每次构建快照都现读它）：插件把增量条目注入该对象，内置 `GitHub Copilot` 路由即把新模型端出来——OAuth 凭据、消息翻译、三协议分派（按条目自带的 `api`）、picker/设置页全部复用既有链路，**不新增路由、不改宿主任何文件、不碰官方安装树、无需重启**。注入成功才写 settings，随后用 `ctx.llm.listModels` 端到端自证；任一条目端不出来即**回滚 settings** 并返回 500 `registry-not-effective`（绝不产出"能选中但发不出去"的假模型）。注册表面不可用（模块加载失败 / 注册表被冻结 / 条目非法）一律结构化报错并保留 journal，可 grep `registry-*`。`/status` 的 `catalogMode`（`file`|`registry`）与 `registryInjected` 可观测。**可写安装树完全不加载注册表面**，web 形态零新增副作用。
-- **远端目录形状规范化（v1.2.5 起）**：pi-ai ≥0.99.0 把目录 JSON 的键改成 `chat:<内层裸 id>`（运行时仍按裸 id 编键）。插件在 preview/apply 共用的取数层统一规范化回裸 id 形状，并跳过键与内层 id 冲突的条目——**不规范化时刷新会"拿到新目录却一个条目都加不进来"**，这条修复对 Web/服务形态同样生效。
-- **重启后的自愈与快照时序（v1.2.6 起，v1.2.7 修正）**：注册表注入只活在进程里，重启后由启动序列（boot1）重放。但 `dsh-llm-pi-ai` 在**挂载时**就把目录解析结果定稿并 memoize（只在 settings 配置对象**身份**变化时重建），而插件挂载晚于它——boot 期注入可能落在快照之后，表现为"settings 里还有该模型、picker 里却看不到"。插件注入后会立刻用**宿主自己的** `listModels` 复核；**同值写回无效**（实测：同值不改变配置身份 ⇒ 快照不重建），因此 v1.2.7 改为**净零切换**：把该路由 `displayName` 改成「原值 + 尾随空格」再改回原值（该键非用户所有则 `unset`）——两次都是真内容变化，**用户配置逐字节不变**，宿主必然重建快照。仍端不出来时记可 grep 的 `lastError: registry-not-served: <ids>`，并暴露 `/status.settingsNotServed`（宿主 API 不可用时 `null`）、`registryVia`（`bare`/`file`）与 `registryInstanceMismatch`（`true` = 进程里存在两份 pi-ai 模块实例）。用户没引用的条目一律不触碰 settings。
+- **补充模型（默认、非破坏）**：候选＝「账号可用 ∩ 目录可解析 − 已配置」，**默认全不勾选**（缺失不等于你想加回来）；勾选后从原预览快照重算（10 分钟内有效、不重新取数），确认时只追加勾选项——现有模型对象、顺序、参数与 modelOverrides 逐字保留。账号证据优先现场拉取；现场失败时 24 小时内同授权的缓存可用于补充，过期/无时间戳/授权已变化只作参考展示、**阻止应用**；重建永远要求现场拉取成功。
+- **重建模型列表（显式、破坏性）**：目标＝「账号可用 ∩ 目录可解析」的纯 ID 列表，同一提交清空本路由 modelOverrides；需**二次确认**，空目标需**单独确认**。移除项按原因列出（不在账号列表 / 目录无法解析）；base 继承的 modelOverrides 无法经用户层清除时明确阻止并解释。
+- **生效时机按落地通道分叉**：可写安装树（web/服务）→ 先对 `github-copilot.json` 做原子只增补丁（pi-ai 代码版本不变），**重启后**插件在目录已加载、目标全部可解析且配置未被你改动的前提下按基线提交配置（改动过则报 conflict、保留你的值）；只读安装树（desktop `app.asar`）→ 进程内注册表注入（ADR 0003），**当次生效、无需重启**，并以宿主 `listModels` 端到端自证，端不出来即回滚（仅当配置仍等于本操作写入值时；否则 rollback-conflict 保留你的新值）。
+- **幂等与并发保护**：每个操作带服务端签发的 operationId——重复提交/网络超时后重查同一 ID 都返回已知结果，绝不重复执行、绝不换 ID 重发；配置提交前复核 revision，任何漂移返回 409 要求重新预览；你的并发编辑永远优先。
+- **恢复与「结束旧配置意图」**：apply 前先持久操作意图，崩溃/重启后启动序列核实恢复；出现 conflict / rollback-conflict / recovery-needed 时，页面提供「结束旧配置意图」显式确认（只结束旧意图，不回滚已发生的更改），随后即可重新预览。
+- **profile 隔离与旧状态（v2）**：刷新状态存于 `<profile>/copilot-auth/refresh-state.json`，配置意图绝不跨 profile 消费；旧版全局状态文件只读检测并提示重新预览确认，不自动继承。
+- **激活与自愈（保留）**：首次成功操作后激活；pi-ai 升级/重装冲掉目录后，同基线启动时按已确认条目**只增重放**（file 通道写盘后提示需再重启加载；registry 通道重放后复核端出）；跨 pi-ai 基线且条目缺失时上报 `self-heal-incompatible`，不自动应用。
+- **数据源与供应链（不变）**：目录数据从 npm 拉取最新 pi-ai tarball（强制 `dist.integrity` 校验、超时与大小上限、tar 严格解析）；npm 失败回退本地目录（`catalogSource: local`），可**显式**改用内置覆盖层（0.85.1 收割，integrity `sha512-+VgVIJDkDO2efYJKEEqvPTH4zmnIaXdAppGbO+vKFA9qy5PdhFiAenuFAkU+oiCSfOC4dMHDyrjdQeL4ZoC5CQ==`）生成新预览——绝不隐式降级。
+- **只增不更新**：合并只补充本机从未见过的模型条目；上游对已有 id 的元数据修正不会同步——这是「永不覆盖」语义的代价（ADR 0001）。
+- **远端目录形状规范化**：pi-ai ≥0.99.0 的 `chat:` 键统一规范化回裸 id；非法/冲突条目进 skipped 列表展示，不静默。
+- **净零切换（v1.2.7 机制保留）**：registry 通道注入落在宿主快照之后时，以 `displayName`「加空格再复原」的两次真内容变化触发快照重建（用户配置逐字节不变）；仍端不出来记 `registry-not-served` 并暴露 `settingsNotServed` / `registryVia` / `registryInstanceMismatch` 诊断。GET `/status` 不执行任何写探针（通道分类来自启动期缓存；`catalogMode` 为 `blocked`/`unknown` 时入口禁用并给出具体原因）。
+- **单宿主进程假设**：互斥为宿主单进程内串行队列，不支持多实例/多进程并发操作同一安装目录。
 
 ## 工作原理
 
 - 通过 `cordis.patch.yml` 两段生效：
-  1. 挂载本插件 entry（host 侧在 webserver 上开 6 条本地路由：`/copilot-auth/start|state|status|logout|refresh/preview|refresh/apply`，跨站 Origin 拒绝）
+  1. 挂载本插件 entry（host 侧在 webserver 上开 8 条本地路由：`/copilot-auth/start|state|status|logout|cancel|refresh/preview|refresh/apply|refresh/retire`，跨站 Origin 拒绝；模型路由要求 `protocolVersion: 2`，`GET /status?operationId=` 返回 active／last／unknown 三态）
   2. 以 settings base 层预置 `github-copilot` 路由（用户 `settings.yaml` 可逐字段覆盖）
 - authorization 服务 **0.1.7+ 由 runtime 内置，无需也不得再挂载**（旧版 ≤0.1.5 请用 1.1.x，其依赖该 insert）
 - 登录走 GitHub 设备码流；凭据存 `~/.dsh/.credentials.yaml`（强制 600 权限）的 `llm-pi-ai/github-copilot` 记录，Copilot 临时 token 到期自动刷新
-- **模型目录兜底填充**：登录成功时，取「账号可用模型 ∩ pi-ai 内置目录」写入该路由的模型目录——仅当该路由尚未配置 `models` 且无 `modelOverrides` 时写入；目录已存在（含空列表）一律让路，插件启动/重启也绝不触碰用户 settings。同步失败经 `/copilot-auth/status` 的 `syncError` 字段暴露
+- **授权状态（v2）**：授权生命周期在 `src/auth-host.mjs`——单实例 attemptId、软撤回（先持久 intentVersion+1 再调宿主撤销）、15 分钟本地等待上限（惰性判定）、进程级风险锁存（重挂不清）；`<profile>/copilot-auth/auth-intent.json` 记录本 profile 显式操作代次，撤回/超时后晚到的授权成功只更新事实、不再生成配置意图
+- **模型目录兜底填充**：登录成功时，取「账号可用模型 ∩ pi-ai 内置目录」写入该路由的模型目录——仅当该路由尚未配置 `models` 且无 `modelOverrides`、且填充 handoff 仍完好时写入；目录已存在（含空列表）一律让路，插件启动/重启也绝不触碰用户 settings。同步失败经 `/copilot-auth/status` 的 `syncError` 字段暴露
+- **刷新状态（v2）**：`src/refresh-service.mjs`（预览快照/证据门禁/幂等查询）＋ `src/refresh-transaction.mjs`（写前意图、两通道提交时点、条件回滚、boot 恢复与保守自愈），状态按 profile 隔离落盘
 
 ## 开发
 
 ```bash
 npm install
-npm test        # node:test：patch 结构 + host/目录/状态机/启动序列/可写性门禁/注册表注入 共 140 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
+npm test        # node:test：patch 结构 + host/授权控制器/客户端状态机/模型策略/预览服务/事务内核/profile 隔离 共 183 条（CI 跑 ubuntu/windows/macos 三平台矩阵）
 npm run build   # esbuild 打包 client 到 lib/client.js（__ModuleLoader__ 信封）
 npm pack --dry-run
 ```
@@ -110,9 +117,13 @@ npm pack --dry-run
 | 路径 | 职责 |
 |---|---|
 | `cordis.patch.yml` | 两段 patch（本插件 entry / 预置路由；authorization 服务 0.1.7+ 由 runtime 内置，不再挂载） |
-| `src/host.mjs` · `src/shared.mjs` | host 半区：登录状态机、6 条本地路由、模型目录同步、刷新 preview/apply 与启动序列 |
+| `src/host.mjs` · `src/shared.mjs` | host 半区：路由接线、status 聚合、启动期能力探测 |
+| `src/auth-host.mjs` | 授权控制器：单实例尝试、软撤回＋风险锁存、禁用退出、首次填充 handoff |
+| `src/runtime-scope.mjs` | 稳定 profile 身份与私有 dataDir（`<profile>/copilot-auth/`） |
+| `src/refresh-service.mjs` · `src/refresh-transaction.mjs` · `src/model-update.mjs` | 预览快照/证据门禁/幂等 · 事务内核与恢复 · 纯变更策略 |
+| `src/client-http.mjs` · `src/auth-flow.mjs` · `src/refresh-flow.mjs` | client 半区：HTTP 脱敏、授权状态机、模型流状态机 |
 | `src/catalog-registry.mjs` | 只读安装树的落地通道：进程内目录注册表注入（ADR 0003） |
-| `src/client.jsx` | client 半区：settings.section 插槽 + 设备码交互 + 双语文案 |
+| `src/client.jsx` | client 半区：settings.section 插槽 + 授权/模型双区交互 + 双语文案 |
 | `scripts/build-client.mjs` | client 打包（`__ModuleLoader__` CJS 工厂信封） |
 | `lib/client.js` | 构建产物（入库，使 git 安装免构建） |
 
@@ -130,8 +141,9 @@ npm pack --dry-run
 - `settings.yaml` 的 `llm-pi-ai:` 节只能稀疏覆盖字段，无法删除预置路由本身（移除须卸载本插件）
 - 路由前缀 `/copilot-auth` 两侧硬编码，不可配置
 - DSH rc 版本耦合：实测 `0.1.7-rc.2` 与 `0.2.0-rc.1`（v1.2.x；`0.1.2-rc.1` 由 v1.1.x 实测），peer 仅 `@deepseek-ai/cordis@^4.0.2`
-- 模型目录只在「尚不存在」时由登录成功兜底填充一次，填充后归用户所有：账号新增的模型不会自动出现——用 GHC 设置页的「**刷新可用模型目录**」同步（见上节），或在 Models 页手动添加
-- 模型目录只写入「可解析」的模型：目录快照外的新模型须先经「刷新可用模型目录」补入——可写安装树补进目录文件、只读安装树（desktop）注入进程内注册表（ADR 0003），两条通道都保持 pi-ai 版本不变
+- 模型目录只在「尚不存在」时由登录成功兜底填充一次，填充后归用户所有：账号新增的模型不会自动出现——用 GHC 设置页的「**补充模型**」勾选加入（见上节），或在 Models 页手动添加
+- 模型目录只写入「可解析」的模型：目录快照外的新模型须先经「补充模型」补入——可写安装树补进目录文件、只读安装树（desktop）注入进程内注册表（ADR 0003），两条通道都保持 pi-ai 版本不变
+- 请求撤回/等待超时后，该 profile 的旧预览与待生效配置意图按 intentVersion 失效（auth-changed / recovery-needed），须重新预览或显式「结束旧配置意图」
 - DSH 升级后自愈仅在 pi-ai 基线版本不变（0.84.4）时重放；跨版本且条目未原生存在时上报 `self-heal-incompatible`，不修改安装树（重新执行一次手动刷新即可在新基线上激活）
 - **dsh-desktop（Electron 桌面版）可刷新模型目录（v1.2.5 起）**：运行时树打包在只读的 `app.asar` 内，写盘通道物理不可用，但刷新改走进程内目录注册表注入（ADR 0003）——当次生效、无需重启、不碰官方产物；重启后由启动序列重放，并按 v1.2.6 的复核/同值触碰机制保证路由真的端出这些模型。前提是该进程的 pi-ai 目录注册表形态与实测一致（`MODELS[provider]` 未冻结、扁平、键=模型 id）；上游改形状时注入守卫会拦下并报 `registry-*` 结构化错误，模型列表保持原样（不写 settings）。v1.2.4 及之前该形态只能置灰刷新入口（`catalog-not-writable`，另见 ADR 0002）
 - 并发保护为宿主单进程内 mutex，**不支持多实例/多进程并发刷新**
