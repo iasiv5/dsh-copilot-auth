@@ -454,7 +454,10 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
   const flowRef = useRef(flow);
   const authFlowRef = useRef(null);
   if (!authFlowRef.current && typeof fetch === "function") {
-    authFlowRef.current = createAuthFlow({ onState: (s) => setAuth(s) });
+    // fetchImpl 必须显式注入（回归修复：v1.2.8 漏传导致授权状态机每次请求
+    // 都在 requestJson 里变成 network-error——页面恒显「未登录」，点「授权登录」
+    // 恒显「失败」且 POST 根本不发出；单测显式注入 fetchImpl 故未拦截）
+    authFlowRef.current = createAuthFlow({ fetchImpl: fetch, onState: (s) => setAuth(s) });
   }
 
   // 刷新状态机的唯一驱动入口：client 只经 advance（不直接调 reduce/runEffect）。

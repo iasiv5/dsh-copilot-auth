@@ -1,6 +1,7 @@
 // T5：浏览器授权状态机——串行、代次保护、409 共同尝试、退避、60s 手动、dispose。
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { createAuthFlow } from "../src/auth-flow.mjs";
 
 function fakeClock() {
@@ -247,4 +248,15 @@ test("start 收到 409 already-configured：恢复 authorized，不轮询不报�
   await tick();
   assert.equal(states.at(-1).phase, "authorized");
   assert.equal(http.calls.filter((c) => c === "/copilot-auth/state").length, 0, "不发起对 attempt 的轮询");
+});
+
+test("WIRING_client.jsx：createAuthFlow 必须显式注入 fetchImpl", () => {
+  // 回归锚：v1.2.8 漏传 fetchImpl → requestJson 把 TypeError 吞成 network-error →
+  // 授权页恒「未登录」、点登录恒「失败」且不发出任何请求（2026-10-04 实机实证）。
+  const src = readFileSync(new URL("../src/client.jsx", import.meta.url), "utf8");
+  const m = src.match(/createAuthFlow\(\{[^}]*\}\)/g) ?? [];
+  assert.ok(m.length >= 1, "client.jsx 应存在 createAuthFlow 接线");
+  for (const call of m) {
+    assert.match(call, /fetchImpl\s*:/, `漏传 fetchImpl 的接线：${call}`);
+  }
 });
