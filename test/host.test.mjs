@@ -56,6 +56,11 @@ function makeCtx(script = {}, opts = {}) {
     script: { notices: [], record: {}, userLayer: undefined, valueLayer: undefined, ...script },
     opts,
   };
+  // T3 起 host 依赖 profileContext 解析 scope（缺省 503）；默认提供临时 profile，
+  // script.noProfileContext=true 时省略以覆盖 known=false 降级分支。
+  if (!ctx.script.noProfileContext) {
+    ctx.profileContext = { name: "test", dir: join(mkdtempSync(join(tmpdir(), "host-profile-")), "profile") };
+  }
   // 0.1.7 起 settings.get 已移除，mock 不再提供 get：readConfiguredRoute 走 describe
   // 默认隔离：未显式注入 stateFile 时给临时文件，测试绝不触碰真实 ~/.dsh 状态
   let bootDone;
@@ -75,9 +80,9 @@ test("插件身份与路由注册", () => {
   const ctx = makeCtx();
   assert.equal(plugin.name, "copilot-auth");
   assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings", "llm"]);
-  assert.ok(ctx.routes.every((r) => r.kind === "exact"), "六条路由必须都是 exact");
+  assert.ok(ctx.routes.every((r) => r.kind === "exact"), "路由必须都是 exact");
   assert.deepEqual(ctx.routes.map((r) => r.path).sort(),
-    ["/copilot-auth/logout", "/copilot-auth/refresh/apply", "/copilot-auth/refresh/preview", "/copilot-auth/start", "/copilot-auth/state", "/copilot-auth/status"]);
+    ["/copilot-auth/cancel", "/copilot-auth/logout", "/copilot-auth/refresh/apply", "/copilot-auth/refresh/preview", "/copilot-auth/start", "/copilot-auth/state", "/copilot-auth/status"]);
 });
 
 test("start 调起 begin：key/method 正确，企业域名提问自动答空串", async () => {
@@ -100,23 +105,23 @@ test("unexpected prompt 使 attempt 失败并进入 failed 态", async () => {
   assert.ok(res.body.error.includes("unexpected prompt"));
 });
 
-test("begin 以 cancelled resolve 时映射为 failed（AuthorizationOutcome 双态）", async () => {
+test("begin 以 cancelled resolve 时映射为待核实并锁存风险（D-01 软撤回，不再映射 failed）", async () => {
   const ctx = makeCtx();
   ctx.authorization.begin = async () => ({ status: "cancelled" });
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));
   const res = await call(handler(ctx, "/state"));
-  assert.equal(res.body.status, "failed");
-  assert.match(res.body.error, /取消/);
+  assert.equal(res.body.status, "withdrawal-pending-unverified");
+  assert.ok(res.body.riskLatch, "cancelled 源结果也置风险锁存");
 });
 
-test("设备码 notice 经 state 可见；running 期间二次 start 返回 409", async () => {
+test("设备码 notice 经 state 可见；waiting 期间二次 start 返回 409", async () => {
   const ctx = makeCtx();
   ctx.authorization.begin = async (req) => { for (const n of ctx.script.notices) req.interaction.notify(n); await new Promise(() => {}); }; // 送达 notices 后永不完成（评审 Agent 注 2026-09-03：原 override 丢弃 interaction，notice 永不进 attempt，断言必挂——原样实测 7 条仅 6 绿）
   ctx.script.notices = [{ message: "Enter this code", url: "https://github.com/login/device", code: "ABCD-1234" }];
   await call(handler(ctx, "/start"), { method: "POST" });
   const state = await call(handler(ctx, "/state"));
-  assert.equal(state.body.status, "running");
+  assert.equal(state.body.status, "waiting");
   assert.deepEqual(state.body.notices.at(-1), { message: "Enter this code", url: "https://github.com/login/device", code: "ABCD-1234" });
   const again = await call(handler(ctx, "/start"), { method: "POST" });
   assert.equal(again.code, 409);
@@ -125,12 +130,24 @@ test("设备码 notice 经 state 可见；running 期间二次 start 返回 409"
 test("status 与 logout 操作固定 credential key", async () => {
   const ctx = makeCtx();
   ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant" } };
-  assert.equal((await call(handler(ctx, "/status"))).body.configured, true);
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.body.configured, true);
+  assert.equal(status.body.authorization.credential, "present");
+  assert.deepEqual(status.body.authorization.capabilities, { logout: false, reauthorize: false });
+  // T3 契约：退出统一拒绝（logout-safety-unavailable），绝不 deleteRecord。
   const out = await call(handler(ctx, "/logout"), { method: "POST" });
-  assert.equal(out.body.ok, true);
-  assert.deepEqual(ctx.credentials.deleteRecordCalls, ["llm-pi-ai/github-copilot"]);
-  const again = await call(handler(ctx, "/logout"), { method: "POST" }); // 评审 Agent 注 2026-09-03：补 v1-A2 的「无记录时同样 ok:true」断言（首次 logout 已清空 record，此即无记录形态）
-  assert.equal(again.body.ok, true);
+  assert.equal(out.code, 403);
+  assert.equal(out.body.error, "logout-safety-unavailable");
+  assert.deepEqual(ctx.credentials.deleteRecordCalls, []);
+});
+
+test("scope known=false（缺 profileContext）：写路由 503，status 带 scopeAvailable:false 且不伪成功", async () => {
+  const ctx = makeCtx({ noProfileContext: true });
+  assert.equal((await call(handler(ctx, "/start"), { method: "POST" })).code, 503);
+  assert.equal((await call(handler(ctx, "/cancel"), { method: "POST" })).code, 503);
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.code, 200);
+  assert.equal(status.body.refresh.scopeAvailable, false);
 });
 
 test("authorized 后把发现的可用模型写入用户 settings 的模型目录（目录外 id 排除）", async () => {
@@ -200,6 +217,59 @@ test("跨站 Origin 拒绝 403，同源/无 Origin 放行", async () => {
   const ctx = makeCtx();
   assert.equal((await call(handler(ctx, "/start"), { method: "POST", headers: { origin: "http://evil.example" } })).code, 403);
   assert.equal((await call(handler(ctx, "/state"))).code, 200);
+});
+
+// ==================== T4: 首次填充 handoff 保护 ====================
+
+test("HANDOFF_撤回后晚到的 authorized：凭据事实可见但 settings 零写入", async () => {
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } },
+    served: [{ id: "gpt-5.4" }],
+  });
+  let settle;
+  ctx.authorization.begin = () => new Promise((r) => { settle = r; });
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 5));
+  const cancelRes = await call(handler(ctx, "/cancel"), { method: "POST" }); // V2（mock 无 cancel → unavailable）
+  assert.equal(cancelRes.body.withdrawalDelivery, "unavailable");
+  settle({ status: "authorized" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctx.settings.mutateCalls.length, 0, "晚到成功不得生成配置意图");
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.body.configured, true, "凭据事实仍如实展示");
+  const state = await call(handler(ctx, "/state"));
+  assert.equal(state.body.status, "authorized");
+  assert.equal(state.body.staleIntent, true);
+});
+
+test("HANDOFF_取数 await 期间意图再变：提交前复核失败，不 mutate", async () => {
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } },
+    served: [{ id: "gpt-5.4" }],
+  });
+  let settle;
+  let releaseRecord;
+  ctx.authorization.begin = () => new Promise((r) => { settle = r; });
+  ctx.credentials.readRecord = () => new Promise((r) => { releaseRecord = r; }); // 取数挂起，制造竞态窗口
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 5));
+  settle({ status: "authorized" });
+  await new Promise((r) => setTimeout(r, 5)); // runSync 进入并 await readRecord
+  await call(handler(ctx, "/cancel"), { method: "POST" }); // 取数期间 V2
+  releaseRecord({ kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctx.settings.mutateCalls.length, 0, "提交前重核失败必须跳过写入");
+});
+
+test("HANDOFF_正常授权（版本未变）：填充恰好一次", async () => {
+  const ctx = makeCtx({
+    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } },
+    served: [{ id: "gpt-5.4" }],
+  });
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(ctx.settings.mutateCalls.length, 1);
+  assert.deepEqual(ctx.settings.mutateCalls[0].ops[0].value, [{ id: "gpt-5.4" }]);
 });
 
 // ==================== Task 8: refresh preview/apply ====================

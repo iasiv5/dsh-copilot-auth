@@ -2,12 +2,14 @@
 // OAuth 设备码流（ctx.authorization）暴露给 Web client，并提供「手动刷新可用
 // 模型目录」（数据级目录补丁，pi-ai 代码版本不动；只读 GET /models 适配显式
 // 耦合 pi-ai 0.84.4，详见 GLOSSARY.md 与 ADR 0001）。
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { CREDENTIAL_KEY, emptyState, routes } from "./shared.mjs";
+import { CREDENTIAL_KEY, routes } from "./shared.mjs";
 import { readJson, writeJsonAtomic, createMutex } from "./atomic-json.mjs";
+import { createAuthorizationController, sanitizeAuthError } from "./auth-host.mjs";
+import { resolveRuntimeScope } from "./runtime-scope.mjs";
 import { mergeCatalog, diffModels, digest, findPiAiInstallation, classifyCatalogTarget, normalizeRemoteCatalog, catalogShapeKeys } from "./catalog.mjs";
 import { fetchLatestCatalog } from "./catalog-fetch.mjs";
 import { injectCatalogEntries, registryModelIds, registryVia, registryInstanceMismatch } from "./catalog-registry.mjs";
@@ -108,6 +110,12 @@ async function syncAvailableModels(ctx, opts = {}) {
     ids = available.filter((id) => served.has(id));
   }
   if (ids.length === 0) return;
+  // T4 首次填充保护：提交前重核 handoff 仍完好（同 attempt、originIntentVersion 仍当前、
+  // 无撤回/超时标记）——取数 await 期间意图已变（撤回 V2/超时）则只记录事实，不写配置。
+  if (opts.handoff) {
+    const intact = typeof opts.handoffIntact === "function" ? opts.handoffIntact(opts.handoff) : false;
+    if (!intact) return;
+  }
   // 真 CAS（与 boot 2a 同款，2026-09-28 审计补充）：携带 expectedRevision 提交，
   // 与用户在 Models 页的并发编辑互斥——冲突时 settings 抛 SETTINGS_CONFLICT，
   // 由 sync() 的 catch 记入 syncError（失败不静默），不再有静默覆盖窗口。
@@ -671,11 +679,48 @@ async function rollbackSettings(ctx, previous) {
   }
 }
 
+// intentVersion 持久层（T3 契约）：`<dataDir>/auth-intent.json` 原子写；
+// scope 未知（缺 profileContext）时读写一律抛错 → 写路由 503，不伪成功。
+function createIntentIO(scope) {
+  const file = scope?.known ? join(scope.dataDir, "auth-intent.json") : null;
+  return {
+    read() {
+      if (!file) throw new Error("scope-unavailable");
+      const raw = readJson(file);
+      return typeof raw?.intentVersion === "number" ? raw.intentVersion : 0;
+    },
+    bump() {
+      if (!file) throw new Error("scope-unavailable");
+      mkdirSync(scope.dataDir, { recursive: true });
+      const cur = readJson(file);
+      const next = (typeof cur?.intentVersion === "number" ? cur.intentVersion : 0) + 1;
+      writeJsonAtomic(file, { version: 1, intentVersion: next, updatedAt: new Date().toISOString() });
+      return next;
+    },
+  };
+}
+
 export function apply(ctx, opts = {}) {
   const r = routes();
-  let attempt = emptyState();
+  const scope = resolveRuntimeScope(ctx);
+  const intentIO = createIntentIO(scope);
   let lastSyncError;
   const refreshMutex = createMutex(); // 宿主单进程内互斥（不支持多实例，见 README）
+
+  // 模型目录同步只在登录成功（且 handoff 完好）后执行；失败不静默，经 /status 暴露。
+  const runSync = (handoff) => syncAvailableModels(ctx, { ...opts, handoff, handoffIntact: controller.handoffIntact }).then(() => {
+    lastSyncError = undefined;
+  }).catch((err) => {
+    lastSyncError = String(err?.message ?? err);
+    ctx.logger?.warn?.("copilot-auth: model sync failed: %s", lastSyncError);
+  });
+
+  // 授权控制器（T3）：软撤回＋风险锁存；退出/重新授权在当前宿主下统一禁用。
+  const controller = createAuthorizationController(ctx, {
+    scope,
+    intentIO,
+    onAuthorized: (handoff) => { void runSync(handoff); },
+  });
 
   // 启动序列：prepared 恢复（先过兼容 gate）→ 激活门 → 自愈 → settings 真 CAS。
   // 绝不阻断挂载；失败仅 lastError + warn。opts.onBootDone 为测试钩子（boot  settle 回调）。
@@ -685,56 +730,51 @@ export function apply(ctx, opts = {}) {
     })
     .finally(() => opts.onBootDone?.());
 
-  // 模型目录同步只在登录成功后执行（2026-09-05 对齐结论：挂载不再同步）。
-  // 插件启动/重启绝不触碰用户 settings，用户精简过的目录不会被动重置。
-  // 失败不静默：错误经 /status 的 syncError 字段暴露，便于诊断。
-  const sync = () => syncAvailableModels(ctx, opts).then(() => { lastSyncError = undefined; }).catch((err) => {
-    lastSyncError = String(err?.message ?? err);
-    ctx.logger?.warn?.("copilot-auth: model sync failed: %s", lastSyncError);
-  });
+  // 模型目录同步已由 controller.onAuthorized → runSync 触发（T3/T4）。
 
   ctx.webServer.register({
     kind: "exact",
     path: r.start,
     handler: (req, res) => {
       if (!guard(req, res, "POST")) return;
-      if (attempt.status === "running") {
-        json(res, 409, { ok: false, error: "already running" });
+      if (!scope.known) {
+        json(res, 503, { ok: false, error: "scope-unavailable" });
         return;
       }
-      attempt = emptyState();
-      attempt.status = "running";
-      const interaction = {
-        notify: (notice) => {
-          attempt.notices.push(notice);
-        },
-        prompt: (p) => {
-          // 企业域名提问答空串（公司是普通 github.com 组织账号）；
-          // 其余任何 prompt 都是未预期的，拒绝并使 attempt 失败。
-          if (p && typeof p.message === "string" && p.message.includes("Enterprise")) {
-            return Promise.resolve("");
-          }
-          return Promise.reject(new Error("unexpected prompt: " + (p?.message ?? String(p))));
-        },
-      };
-      // 响应先行：begin 以后台任务执行，handler 返回路径不得 await begin。
-      void ctx.authorization
-        .begin({ key: CREDENTIAL_KEY, method: "oauth", interaction })
-        .then((outcome) => {
-          // AuthorizationOutcome.status: 'authorized' | 'cancelled'（types.d.ts L68-71）
-          if (outcome && outcome.status === "authorized") {
-            attempt.status = "authorized";
-            void sync();
-          } else {
-            attempt.status = "failed";
-            attempt.error = "登录已取消";
-          }
-        })
-        .catch((err) => {
-          attempt.status = "failed";
-          attempt.error = String(err?.message ?? err);
-        });
-      json(res, 202, { ok: true });
+      try {
+        const { attemptId } = controller.start();
+        json(res, 202, { ok: true, attemptId });
+      } catch (err) {
+        if (err?.code === "ATTEMPT_RUNNING") {
+          json(res, 409, { ok: false, error: "already running", attemptId: err.attemptId });
+          return;
+        }
+        if (err?.code === "AUTH_UNSAFE") {
+          json(res, 409, { ok: false, error: "auth-unsafe" });
+          return;
+        }
+        json(res, 500, { ok: false, error: sanitizeAuthError(err) });
+      }
+    },
+  });
+
+  // 请求撤回（T3/D-01 软撤回）：先持久失效本地意图，再尝试宿主撤销；
+  // 任何 delivery 都不承诺晚写停止，风险锁存保持待核实。
+  ctx.webServer.register({
+    kind: "exact",
+    path: r.cancel,
+    handler: async (req, res) => {
+      if (!guard(req, res, "POST")) return;
+      if (!scope.known) {
+        json(res, 503, { ok: false, error: "scope-unavailable" });
+        return;
+      }
+      try {
+        const { withdrawalDelivery } = await controller.cancel();
+        json(res, 200, { ok: true, withdrawalDelivery });
+      } catch (err) {
+        json(res, 500, { ok: false, error: sanitizeAuthError(err) });
+      }
     },
   });
 
@@ -743,7 +783,7 @@ export function apply(ctx, opts = {}) {
     path: r.state,
     handler: (req, res) => {
       if (!guard(req, res, "GET")) return;
-      json(res, 200, attempt);
+      json(res, 200, controller.snapshot());
     },
   });
 
@@ -753,13 +793,14 @@ export function apply(ctx, opts = {}) {
     handler: async (req, res) => {
       if (!guard(req, res, "GET")) return;
       // describeRecord 只回传 presence，不把含 token 的 GrantRecord 拉进内存。
-      let configured = false;
+      let credential = "absent";
       try {
         const info = await ctx.credentials.describeRecord(CREDENTIAL_KEY);
-        configured = info?.configured === true;
+        credential = info?.configured === true ? "present" : "absent";
       } catch {
-        configured = false;
+        credential = "read-error";
       }
+      const authSnapshot = controller.snapshot();
       // refresh 状态块：lastError 直读状态文件顶层（R3-6）；pendingRestart 派生自
       // 状态文件（journal 相位或 restartState），不用模块布尔；piAiVersion /
       // catalogDigest / catalogFile 来自同根解析，digest 为当前文件字节 sha256
@@ -780,6 +821,7 @@ export function apply(ctx, opts = {}) {
       }
       const state = peekState(opts.stateFile ?? defaultStateFile());
       const refresh = {
+        scopeAvailable: scope.known,
         activated: state.activated === true,
         pendingRestart: state.restartState != null || state.journal?.phase === "catalog-committed-needs-restart",
         phase: state.journal?.phase ?? null,
@@ -800,25 +842,28 @@ export function apply(ctx, opts = {}) {
       // instanceMismatch=true 说明进程里存在两份模块实例——(b) 类故障的直接证据。
       refresh.registryVia = registryVia();
       refresh.registryInstanceMismatch = registryInstanceMismatch();
-      json(res, 200, { configured, syncError: lastSyncError, refresh });
+      json(res, 200, {
+        configured: credential === "present",
+        syncError: lastSyncError,
+        // 授权独立维度（T3）：凭据事实、尝试快照、风险锁存与能力门。
+        authorization: {
+          credential,
+          attempt: authSnapshot,
+          riskLatch: authSnapshot.riskLatch,
+          capabilities: { logout: false, reauthorize: false }, // 当前宿主无法证明安全，默认禁用
+        },
+        refresh,
+      });
     },
   });
 
+  // 退出登录：当前宿主桥接无法证明安全退出（D-01），统一拒绝且绝不 deleteRecord。
   ctx.webServer.register({
     kind: "exact",
     path: r.logout,
-    handler: async (req, res) => {
+    handler: (req, res) => {
       if (!guard(req, res, "POST")) return;
-      // 幂等契约：deleteRecord 对不存在记录是 no-op 且正常 resolve，
-      // 真实删除与否由随后的 /status 反映。异常兜底与其余路由对齐
-      // （2026-09-28 审计：无 try/catch 的 reject 会造成连接悬挂/未处理拒绝）。
-      try {
-        await ctx.credentials.deleteRecord(CREDENTIAL_KEY);
-      } catch (err) {
-        json(res, 500, { ok: false, error: String(err?.message ?? err) });
-        return;
-      }
-      json(res, 200, { ok: true });
+      json(res, 403, { ok: false, error: "logout-safety-unavailable" });
     },
   });
 

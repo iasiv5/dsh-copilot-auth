@@ -7,6 +7,7 @@
 // （octicons copilot-16，fill=currentColor，浅/深主题自动一致）。
 import { useEffect, useRef, useState } from "react";
 import { initial as refreshInitial, advance } from "./refresh-flow.mjs";
+import { createAuthFlow } from "./auth-flow.mjs";
 
 export const name = "copilot-auth-ui";
 export const inject = ["slots", "locale"];
@@ -14,15 +15,27 @@ export const inject = ["slots", "locale"];
 const DICTS = {
   en: {
     nav: "GHC Settings",
-    title: "GitHub Copilot Sign-in",
-    intro: "Sign in to Copilot with your company GitHub account using the device code — no API token required.",
+    title: "GitHub Copilot",
+    intro: "Authorize with a personal or organization account on github.com that has Copilot access. No API token is required.",
     idle: "Not signed in",
-    running: "Signing in…",
+    waiting: "Waiting for you to authorize on GitHub",
     authorized: "Signed in",
     failed: "Failed",
     loading: "…",
     login: "Sign in",
     logout: "Sign out",
+    reauthorize: "Reauthorize",
+    withdrawAuth: "Request withdrawal",
+    withdrawal: "Withdrawal requested; the outcome remains unverified.",
+    withdrawalUnavailable: "The withdrawal request could not be sent to the host; the outcome remains unverified.",
+    authUnsafe: "Safe completion of the authorization flow is unconfirmed. Sign-out and a new authorization attempt are unavailable.",
+    attemptTimeout: "Authorization wait timed out; the outcome remains unverified. A new authorization attempt is unavailable. Check the status or verify it manually.",
+    attemptShared: "An authorization attempt is already running in this instance.",
+    unavailable: "This runtime lacks the capabilities needed to apply changes safely.",
+    connection: "Connection lost. The last confirmed status is shown.",
+    retryNow: "Check status",
+    copyFailed: "Copy failed. Select and copy the device code manually.",
+    riskBadge: "Outcome unverified",
     codeHint: "Open the link below and enter this code to finish signing in:",
     copy: "Copy",
     copied: "Copied ✓",
@@ -62,15 +75,27 @@ const DICTS = {
   },
   zh: {
     nav: "GHC设置",
-    title: "GitHub Copilot 登录",
-    intro: "使用公司 GitHub 账号通过设备码授权登录 Copilot，无需填写 API Token。",
+    title: "GitHub Copilot",
+    intro: "使用具有 Copilot 权限的 github.com 个人或组织账号授权，无需填写 API Token。",
     idle: "未登录",
-    running: "进行中…",
+    waiting: "等待你在 GitHub 完成授权",
     authorized: "已登录",
     failed: "失败",
     loading: "…",
-    login: "登录",
-    logout: "注销",
+    login: "授权登录",
+    logout: "退出登录",
+    reauthorize: "重新授权",
+    withdrawAuth: "请求撤回",
+    withdrawal: "撤回请求已发送，结果仍待核实。",
+    withdrawalUnavailable: "未能向宿主发送撤回请求，结果仍待核实。",
+    authUnsafe: "尚不能确认授权流程已安全结束，暂不能退出或发起新的授权尝试。",
+    attemptTimeout: "等待授权超时，结果仍待核实。当前不能发起新的授权尝试，请查询状态或人工核实。",
+    attemptShared: "此实例已有授权正在进行。",
+    unavailable: "当前运行时缺少安全应用所需的能力，暂不能应用更改。",
+    connection: "连接异常，显示的是最后确认的状态。",
+    retryNow: "查询状态",
+    copyFailed: "复制失败，请手动选中设备码复制。",
+    riskBadge: "结果待核实",
     codeHint: "在浏览器打开下面的链接，输入这串代码完成授权：",
     copy: "复制",
     copied: "已复制 ✓",
@@ -208,7 +233,7 @@ const styles = {
   mono: { fontFamily: "ui-monospace, monospace" },
 };
 
-const badgeColor = { idle: "#adb5bd", running: "#f59f00", authorized: "#37b24d", failed: "#e03131", loading: "#adb5bd" };
+const badgeColor = { idle: "#adb5bd", waiting: "#f59f00", authorized: "#37b24d", failed: "#e03131", loading: "#adb5bd", risk: "#f59f00", unavailable: "#adb5bd" };
 
 // 主题表面色采样：取 body 计算背景并剥掉 alpha——皮肤可能把 bg-base 做成半透明
 // 磨砂（凡人修仙传 BEAUTY 即 rgba(18,18,26,0.35)），弹窗叠在遮罩上必须不透明；
@@ -300,13 +325,16 @@ function RefreshModal({ t, flow, onConfirm, onCancel, onOverlay }) {
 }
 
 function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
-  const [page, setPage] = useState("loading"); // loading | idle | running | authorized | failed
-  const [notices, setNotices] = useState([]);
-  const [error, setError] = useState(undefined);
+  // 授权区：唯一驱动入口是 authFlow（串行控制器，T5）；刷新区沿用 refresh-flow（T11 改造）。
+  const [auth, setAuth] = useState({ phase: "loading", connectivity: "online", shared: false });
   const [copied, setCopied] = useState(false);
-  const timer = useRef(null);
+  const [copyFail, setCopyFail] = useState(false);
   const [flow, setFlow] = useState(refreshInitial);
   const flowRef = useRef(flow);
+  const authFlowRef = useRef(null);
+  if (!authFlowRef.current && typeof fetch === "function") {
+    authFlowRef.current = createAuthFlow({ onState: (s) => setAuth(s) });
+  }
 
   // 刷新状态机的唯一驱动入口：client 只经 advance（不直接调 reduce/runEffect）。
   // onState 同步落中间态，applying 期间重复 confirm 被 reducer 忽略（双击安全）。
@@ -322,114 +350,107 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
   }, []);
 
   useEffect(() => {
-    let alive = true;
-    fetch("/copilot-auth/status")
-      .then((r) => r.json())
-      .then((d) => {
-        if (!alive) return;
-        if (d.configured) { setPage("authorized"); return; }
-        // 未配置时回查最近一次 attempt：失败要显式呈现（不能吞成「未登录」），
-        // 进行中则恢复轮询（设置面板往返导致的重挂载不丢登录进度）。
-        fetch("/copilot-auth/state")
-          .then((r) => r.json())
-          .then((s) => {
-            if (!alive) return;
-            setNotices(s.notices ?? []);
-            if (s.status === "failed") {
-              setPage("failed");
-              setError(s.error ?? t("unknown"));
-            } else if (s.status === "running") {
-              setPage("running");
-              poll();
-            } else {
-              setPage("idle");
-            }
-          })
-          .catch(() => { if (alive) setPage("idle"); });
-      })
-      .catch(() => { if (alive) setPage("idle"); });
-    return () => {
-      alive = false;
-      if (timer.current) clearInterval(timer.current);
-    };
+    void authFlowRef.current?.init();
+    return () => authFlowRef.current?.dispose(); // 仅停止本页请求，不清宿主风险状态
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const poll = () => {
-    if (timer.current) clearInterval(timer.current);
-    timer.current = setInterval(() => {
-      fetch("/copilot-auth/state")
-        .then((r) => r.json())
-        .then((s) => {
-          setNotices(s.notices ?? []);
-          if (s.status !== "running") {
-            if (timer.current) clearInterval(timer.current);
-            timer.current = null;
-            if (s.status === "authorized") {
-              setPage("authorized");
-            } else {
-              setPage("failed");
-              setError(s.error ?? t("unknown"));
-            }
-          }
-        })
-        .catch(() => { /* 网络抖动时继续下一轮轮询 */ });
-    }, 1000);
-  };
 
   const login = () => {
     setCopied(false);
-    setError(undefined);
-    setNotices([]);
-    fetch("/copilot-auth/start", { method: "POST" }).catch(() => {});
-    setPage("running");
-    poll();
+    setCopyFail(false);
+    void authFlowRef.current?.start();
   };
-
-  const logout = async () => {
-    if (timer.current) { clearInterval(timer.current); timer.current = null; }
-    try { await fetch("/copilot-auth/logout", { method: "POST" }); } catch { /* 状态以下一步查询为准 */ }
-    setNotices([]);
-    setError(undefined);
-    setPage("idle");
+  const withdraw = () => {
+    void authFlowRef.current?.cancel(); // 请求撤回：单次调用，结果待核实
+  };
+  const checkStatus = () => {
+    void authFlowRef.current?.refresh();
   };
 
   const copyCode = async (code) => {
     try {
       await navigator.clipboard.writeText(code);
       setCopied(true);
+      setCopyFail(false);
       setTimeout(() => setCopied(false), 2000);
-    } catch { /* 剪贴板不可用时静默 */ }
+    } catch {
+      setCopyFail(true); // 设备码文本始终可手动选中复制
+    }
   };
 
-  const codeNotice = [...notices].reverse().find((n) => n && typeof n.code === "string" && n.code !== "");
-  const badgeText = page === "loading" ? t("loading") : t(page);
+  const phase = auth.phase;
+  const attempt = auth.attempt;
+  const notices = [...(attempt?.notices ?? [])].reverse();
+  const codeNotice = typeof attempt?.code === "string" && attempt.code !== ""
+    ? { code: attempt.code, url: attempt.url }
+    : (() => {
+      const n = notices.find((x) => x && typeof x.code === "string" && x.code !== "");
+      return n ? { code: n.code, url: n.url } : null;
+    })();
+  const badgeText = t(phase === "risk" ? "riskBadge" : phase === "loading" ? "loading" : phase);
 
   return (
     <div style={styles.section}>
       <h3 style={styles.title}>{t("title")}</h3>
       <p style={styles.intro}>{t("intro")}</p>
       <div style={styles.badgeRow}>
-        <span style={{ ...styles.dot, background: badgeColor[page] ?? "#adb5bd" }} />
+        <span style={{ ...styles.dot, background: badgeColor[phase] ?? "#adb5bd" }} />
         <span style={styles.badge}>{badgeText}</span>
       </div>
-      {page === "running" && codeNotice && (
-        <div style={styles.card}>
-          <p style={styles.codeHint}>{t("codeHint")}</p>
-          <div style={styles.codeRow}>
-            <span style={styles.code}>{codeNotice.code}</span>
-            <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={() => copyCode(codeNotice.code)}>
-              {copied ? t("copied") : t("copy")}
-            </button>
-          </div>
-          {codeNotice.url && (
-            <a style={styles.link} href={codeNotice.url} target="_blank" rel="noreferrer">{codeNotice.url}</a>
-          )}
+      {auth.connectivity !== "online" && phase !== "loading" && (
+        <p style={styles.banner}>⚠ {t("connection")}</p>
+      )}
+      {auth.connectivity === "manual" && (
+        <div>
+          <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={checkStatus}>{t("retryNow")}</button>
         </div>
       )}
-      {page === "failed" && error && <p style={styles.error}>{error}</p>}
-      {page === "authorized" && (
+      {phase === "waiting" && (
+        <>
+          {auth.shared && <p style={styles.banner}>ⓘ {t("attemptShared")}</p>}
+          {codeNotice && (
+            <div style={styles.card}>
+              <p style={styles.codeHint}>{t("codeHint")}</p>
+              <div style={styles.codeRow}>
+                <span style={styles.code}>{codeNotice.code}</span>
+                <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={() => copyCode(codeNotice.code)}>
+                  {copied ? t("copied") : t("copy")}
+                </button>
+              </div>
+              {codeNotice.url && (
+                <a style={styles.link} href={codeNotice.url} target="_blank" rel="noreferrer">{codeNotice.url}</a>
+              )}
+              {copyFail && <p style={styles.error}>{t("copyFailed")}</p>}
+            </div>
+          )}
+          <div>
+            <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={withdraw}>{t("withdrawAuth")}</button>
+          </div>
+        </>
+      )}
+      {phase === "risk" && (
+        <div style={styles.card}>
+          <p style={styles.banner}>⚠ {t("authUnsafe")}</p>
+          {auth.riskKind === "withdrawal-pending-unverified" && (
+            <p style={styles.modalText}>
+              {auth.withdrawalDelivery === "invoked" ? t("withdrawal") : t("withdrawalUnavailable")}
+            </p>
+          )}
+          {auth.riskKind === "timed-out-unverified" && <p style={styles.modalText}>{t("attemptTimeout")}</p>}
+          <div>
+            <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={checkStatus}>{t("retryNow")}</button>
+          </div>
+        </div>
+      )}
+      {phase === "unavailable" && (
+        <p style={styles.banner}>⚠ {t("unavailable")}</p>
+      )}
+      {phase === "failed" && attempt?.error && <p style={styles.error}>{attempt.error}</p>}
+      {phase === "authorized" && (
         <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={logout}>{t("logout")}</button>
+          {/* 退出/重新授权：当前宿主无法证明安全（D-01），统一禁用并说明 */}
+          <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("authUnsafe")}>{t("logout")}</button>
+          <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("authUnsafe")}>{t("reauthorize")}</button>
           <button
             type="button"
             style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(flow) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
@@ -440,19 +461,20 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
           </button>
         </div>
       )}
-      {page === "authorized" && isRegistryMode(flow) && flow.name !== "failed" && (
+      {phase === "authorized" && <p style={styles.banner}>ⓘ {t("authUnsafe")}</p>}
+      {phase === "authorized" && isRegistryMode(flow) && flow.name !== "failed" && (
         <p style={styles.banner}>ⓘ {t("registryMode")}</p>
       )}
-      {page === "authorized" && refreshBlocked(flow) && flow.name !== "failed" && (
+      {phase === "authorized" && refreshBlocked(flow) && flow.name !== "failed" && (
         <p style={styles.banner}>⚠ {t("notWritable")}</p>
       )}
-      {page === "authorized" && flow.name === "applied" && (
+      {phase === "authorized" && flow.name === "applied" && (
         <p style={styles.banner}>{t("registryApplied").replace("%s", String(flow.injected ?? 0))}</p>
       )}
-      {page === "authorized" && flow.name === "restartNeeded" && (
+      {phase === "authorized" && flow.name === "restartNeeded" && (
         <p style={styles.banner}>⚠ {t("restartNeeded")}</p>
       )}
-      {page === "authorized" && flow.name === "failed" && (
+      {phase === "authorized" && flow.name === "failed" && (
         <p style={styles.error}>{flow.error === "state-corrupt" ? t("stateCorrupt")
           : flow.error === "catalog-not-writable" ? t("notWritable")
           : flow.error === "registry-inject-failed" || flow.error === "registry-not-effective" ? t("registryFailed")
@@ -467,7 +489,7 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
           onOverlay={() => drive({ type: "start", mode: "overlay" })}
         />
       )}
-      {(page === "idle" || page === "failed") && (
+      {(phase === "idle" || phase === "failed") && (
         <div>
           <button type="button" style={{ ...styles.button, ...styles.primary }} onClick={login}>{t("login")}</button>
         </div>
