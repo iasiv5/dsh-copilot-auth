@@ -11,7 +11,8 @@ test("已知 profileContext → known=true，profileId 为 16 位 hex，dataDir 
   assert.match(s.profileId, /^[0-9a-f]{16}$/);
   // 期望值用 join 生成（Windows 下分隔符为反斜杠，硬编码 POSIX 斜杠会误报）
   assert.equal(s.dataDir, join("/dsh/profiles/web", "copilot-auth"));
-  assert.ok(s.dataDir.startsWith(ctx.profileContext.dir), "dataDir 必须落在 profile 私有目录内");
+  // 前缀断言同样须经 join 规范化（输入正斜杠在 win32 会被 join 改写为反斜杠）
+  assert.ok(s.dataDir.startsWith(join(ctx.profileContext.dir)), "dataDir 必须落在 profile 私有目录内");
 });
 
 test("同 dir 不同 name → 不同 profileId", () => {
