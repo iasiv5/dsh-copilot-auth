@@ -1,6 +1,8 @@
 # Copilot 授权与模型管理统一实施计划（简化合并版）
 
-状态：2026-10-04 由[计划A：授权与状态](<2026-10-03-copilot-authorization-state-implementation-plan.md>)与[计划B：模型事务](<2026-10-03-copilot-model-transactions-implementation-plan.md>)合并简化而成，**取代二者作为唯一实施依据**；待用户批准后由编码 agent 执行，任务均未开始。设计事实以[设计规格](<../design/2026-10-03-dual-profile-auth-and-models.md>)与[ADR 0004](<../adr/0004-safe-model-management-and-profile-isolation.md>)为准，本计划只保留其中用户可感知的正确性修复与功能拆分，防御性协议机器按「非目标」节明确裁掉。2026-10-04 第 1 轮独立评审提出 12 项问题（1 阻断／3 重要／8 建议），已全部修订并经第 2 轮复核确认；第 2 轮另提 6 项（1 重要／5 建议）、第 3 轮再提 2 项（1 重要／1 建议）均已修订入本版。
+状态：2026-10-04 由[计划A：授权与状态](<2026-10-03-copilot-authorization-state-implementation-plan.md>)与[计划B：模型事务](<2026-10-03-copilot-model-transactions-implementation-plan.md>)合并简化而成，**取代二者作为唯一实施依据**。设计事实以[设计规格](<../design/2026-10-03-dual-profile-auth-and-models.md>)与[ADR 0004](<../adr/0004-safe-model-management-and-profile-isolation.md>)为准，本计划只保留其中用户可感知的正确性修复与功能拆分，防御性协议机器按「非目标」节明确裁掉。2026-10-04 第 1 轮独立评审提出 12 项问题（1 阻断／3 重要／8 建议），已全部修订并经第 2 轮复核确认；第 2 轮另提 6 项（1 重要／5 建议）、第 3 轮再提 2 项（1 重要／1 建议）均已修订入本版。
+
+**执行记录（2026-10-04）**：T0–T12 已全部在 main 分支实施完成（checkpoint：`ffc26ed` 阶段一 T0–T5、`d778dd1` 阶段二/三 T6–T12）；全量 183 条测试绿、`npm run build` 产物同步、`npm pack --dry-run` 22 文件含全部 7 个新模块且无测试/秘密文件。未发布（G09）；实机人工验收清单待用户另行授权后执行。
 
 ## 目标
 
