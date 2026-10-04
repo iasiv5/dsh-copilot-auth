@@ -501,14 +501,14 @@ export function apply(ctx, opts = {}) {
   ctx.webServer.register({
     kind: "exact",
     path: r.start,
-    handler: (req, res) => {
+    handler: async (req, res) => {
       if (!guard(req, res, "POST")) return;
       if (!scope.known) {
         json(res, 503, { ok: false, error: "scope-unavailable" });
         return;
       }
       try {
-        const { attemptId } = controller.start();
+        const { attemptId } = await controller.start();
         json(res, 202, { ok: true, attemptId });
       } catch (err) {
         if (err?.code === "ATTEMPT_RUNNING") {
@@ -517,6 +517,10 @@ export function apply(ctx, opts = {}) {
         }
         if (err?.code === "AUTH_UNSAFE") {
           json(res, 409, { ok: false, error: "auth-unsafe" });
+          return;
+        }
+        if (err?.code === "ALREADY_CONFIGURED") {
+          json(res, 409, { ok: false, error: "already-configured" });
           return;
         }
         json(res, 500, { ok: false, error: sanitizeAuthError(err) });

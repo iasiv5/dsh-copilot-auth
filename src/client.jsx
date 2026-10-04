@@ -40,6 +40,11 @@ const DICTS = {
     copy: "Copy",
     copied: "Copied ✓",
     unknown: "Unknown error",
+    statusUnknown: "Status unknown",
+    errNetwork: "Network error: cannot reach the authorization service. Retrying automatically.",
+    errGateway: "Gateway error: the DSH service may be restarting. Retrying automatically.",
+    errBadResponse: "Unexpected response from the authorization service.",
+    errHttp: "The authorization request failed. Check status and retry.",
     // ---- Model management (protocol v2, design §5) ----
     supplement: "Add models",
     rebuild: "Rebuild model list",
@@ -117,6 +122,11 @@ const DICTS = {
     copy: "复制",
     copied: "已复制 ✓",
     unknown: "未知错误",
+    statusUnknown: "状态未知",
+    errNetwork: "网络异常：无法连接授权服务，正在自动重试。",
+    errGateway: "网关错误：DSH 服务可能正在重启，正在自动重试。",
+    errBadResponse: "授权服务返回异常响应。",
+    errHttp: "授权请求失败。请查询状态后重试。",
     // ---- 模型管理（协议 v2，设计§5） ----
     supplement: "补充模型",
     rebuild: "重建模型列表",
@@ -178,6 +188,18 @@ function blockedReasonText(t, flags) {
   const reason = flags?.blockedReason;
   if (reason && t("blockedReasons")?.[reason]) return t("blockedReasons")[reason];
   return t("unavailable");
+}
+
+// HTTP 层错误（requestJson messageKey）→ 面向用户的原因文案。
+// 历史缺陷：start/status 请求在创建 attempt 之前失败时，页面只显示裸「失败」，
+// 真实原因（网络/网关/响应异常）被吞掉——现在如实分层展示。
+function httpErrorText(t, key) {
+  return {
+    "network-error": t("errNetwork"),
+    "bad-gateway": t("errGateway"),
+    "bad-response": t("errBadResponse"),
+    "http-error": t("errHttp"),
+  }[key];
 }
 
 // octicons copilot-16（MIT，github/primer）——单色 currentColor，随主题变色
@@ -486,7 +508,10 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
       const n = notices.find((x) => x && typeof x.code === "string" && x.code !== "");
       return n ? { code: n.code, url: n.url } : null;
     })();
-  const badgeText = t(phase === "risk" ? "riskBadge" : phase === "loading" ? "loading" : phase);
+  const badgeText = phase === "risk" ? t("riskBadge")
+    : phase === "loading" ? t("loading")
+    : phase === "idle" && auth.error ? t("statusUnknown") // 加载失败≠未登录，如实显示状态未知
+    : t(phase);
 
   return (
     <div style={styles.section}>
@@ -545,6 +570,17 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
         <p style={styles.banner}>⚠ {t("unavailable")}</p>
       )}
       {phase === "failed" && attempt?.error && <p style={styles.error}>{attempt.error}</p>}
+      {phase === "failed" && !attempt?.error && (
+        <>
+          <p style={styles.banner}>⚠ {httpErrorText(t, auth.error) ?? t("unknown")}</p>
+          <div>
+            <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={checkStatus}>{t("retryNow")}</button>
+          </div>
+        </>
+      )}
+      {phase === "idle" && auth.error && (
+        <p style={styles.banner}>⚠ {httpErrorText(t, auth.error) ?? t("unknown")}</p>
+      )}
       {phase === "authorized" && (
         <div style={styles.card}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>

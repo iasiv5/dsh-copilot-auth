@@ -185,3 +185,66 @@ test("手动 refresh 恢复自动轮询并重置失败窗口", async () => {
   assert.equal(states.at(-1).connectivity, "online");
   assert.equal(states.at(-1).phase, "waiting");
 });
+
+test("init 失败：退避自动重试，服务恢复后恢复 authorized（不再卡死在过期视图）", async () => {
+  const http = makeFetch();
+  const clock = fakeClock();
+  const states = [];
+  http.respond("/copilot-auth/status", { status: 502, body: "<html>Bad Gateway</html>", contentType: "text/html" });
+  const flow = createAuthFlow({ fetchImpl: http.fetchImpl, clock, onState: (s) => states.push(s) });
+  await flow.init();
+  assert.equal(states.at(-1).connectivity, "retrying");
+  clock.advance(1001); // 第 1 次重试仍失败
+  await tick();
+  assert.equal(states.at(-1).connectivity, "retrying");
+  http.respond("/copilot-auth/status", { body: JSON.stringify({ configured: true }) });
+  clock.advance(2001); // 第 2 次重试成功
+  await tick();
+  assert.equal(states.at(-1).phase, "authorized");
+  assert.equal(clock.pending(), 0, "恢复后不再有重试定时器");
+});
+
+test("init 持续失败：累计 60 秒转手动，phase=idle 且保留 messageKey（不冒充未登录）", async () => {
+  const http = makeFetch();
+  const clock = fakeClock();
+  const states = [];
+  http.respond("/copilot-auth/status", { status: 502, body: "<html>x</html>", contentType: "text/html" });
+  const flow = createAuthFlow({ fetchImpl: http.fetchImpl, clock, onState: (s) => states.push(s) });
+  await flow.init();
+  let guard = 0;
+  while (states.at(-1).connectivity !== "manual" && guard++ < 20) {
+    clock.advance(16000);
+    await tick();
+  }
+  assert.equal(states.at(-1).connectivity, "manual");
+  assert.equal(states.at(-1).phase, "idle");
+  assert.equal(states.at(-1).error, "bad-gateway");
+  assert.equal(clock.pending(), 0);
+});
+
+test("手动 refresh 完整重跑 init：从过期未登录视图恢复 authorized", async () => {
+  const http = makeFetch();
+  const clock = fakeClock();
+  const states = [];
+  http.respond("/copilot-auth/status", { body: JSON.stringify({ configured: false }) });
+  http.respond("/copilot-auth/state", { body: JSON.stringify({ attemptId: null, status: "idle", riskLatch: null }) });
+  const flow = createAuthFlow({ fetchImpl: http.fetchImpl, clock, onState: (s) => states.push(s) });
+  await flow.init();
+  assert.equal(states.at(-1).phase, "idle");
+  http.respond("/copilot-auth/status", { body: JSON.stringify({ configured: true }) });
+  flow.refresh(); // 「查询状态」
+  await tick();
+  assert.equal(states.at(-1).phase, "authorized");
+});
+
+test("start 收到 409 already-configured：恢复 authorized，不轮询不报错", async () => {
+  const http = makeFetch();
+  const clock = fakeClock();
+  const states = [];
+  http.respond("/copilot-auth/start", { status: 409, body: JSON.stringify({ ok: false, error: "already-configured" }) });
+  const flow = createAuthFlow({ fetchImpl: http.fetchImpl, clock, onState: (s) => states.push(s) });
+  await flow.start();
+  await tick();
+  assert.equal(states.at(-1).phase, "authorized");
+  assert.equal(http.calls.filter((c) => c === "/copilot-auth/state").length, 0, "不发起对 attempt 的轮询");
+});

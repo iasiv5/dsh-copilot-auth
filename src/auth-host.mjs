@@ -40,11 +40,21 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
     if (!scope?.known) throw authError("SCOPE_UNAVAILABLE", "scope-unavailable");
   };
 
-  function start() {
+  async function start() {
     requireScope();
     if (riskLatch) throw authError("AUTH_UNSAFE", "auth-unsafe", { riskLatch });
     if (attempt && LIVE_STATUSES.includes(attempt.status)) {
       throw authError("ATTEMPT_RUNNING", "already running", { attemptId: attempt.attemptId });
+    }
+    // 初始授权条件（设计 Q21）：已有凭据时禁止新的授权尝试——那是对既有授权的
+    // 隐式替换（历史实证：已登录状态下点「授权登录」，begin 带着已存在的凭据发起
+    // 设备流，attempt 永远停在 starting，最终以「失败」收场）。「重新授权」在宿主
+    // 可证明安全前默认禁用。describeRecord 自身失败不阻断（读不到≠存在）。
+    try {
+      const info = await ctx.credentials.describeRecord(CREDENTIAL_KEY);
+      if (info?.configured === true) throw authError("ALREADY_CONFIGURED", "already-configured");
+    } catch (err) {
+      if (err?.code === "ALREADY_CONFIGURED") throw err;
     }
     // 先持久意图版本，失败不发 begin（安全门拒绝动作不产生副作用）
     const originIntentVersion = intentIO.bump();

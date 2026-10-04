@@ -153,7 +153,11 @@ test("scope known=false（缺 profileContext）：写路由 503，status 带 sco
 
 test("authorized 后把发现的可用模型写入用户 settings 的模型目录（目录外 id 排除）", async () => {
   const ctx = makeCtx();
-  ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.6-luna", "gpt-5.4", "gemini-3.8-flash"] } } };
+  // 凭据在授权完成时才物化：start 的 already-configured 门要求开始时无凭据
+  ctx.authorization.begin = async () => {
+    ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.6-luna", "gpt-5.4", "gemini-3.8-flash"] } } };
+    return { status: "authorized" };
+  };
   ctx.script.served = [{ id: "gpt-5.6-luna" }, { id: "gpt-5.4" }]; // 运行时目录未描述 gemini-3.8-flash
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));
@@ -173,10 +177,11 @@ test("挂载不再同步模型目录——即使已登录也不触碰用户 sett
 test("登录时目录已存在（含空列表）则不写入——用户精简不被重置（describe user 层，0.1.5- 形态）", async () => {
   const custom = [{ id: "gpt-5.4" }, { id: "claude-opus-4.8" }, { id: "gemini-3.7-flash" }];
   for (const models of [custom, []]) {
-    const ctx = makeCtx({
-      record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } },
-      userLayer: { providers: { "github-copilot": { models } } },
-    });
+    const ctx = makeCtx({ userLayer: { providers: { "github-copilot": { models } } } });
+    ctx.authorization.begin = async () => {
+      ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } };
+      return { status: "authorized" };
+    };
     await call(handler(ctx, "/start"), { method: "POST" });
     await new Promise((r) => setTimeout(r, 10));
     assert.equal(ctx.settings.mutateCalls.length, 0, `models=${JSON.stringify(models)} 应视作用户所有`);
@@ -185,9 +190,12 @@ test("登录时目录已存在（含空列表）则不写入——用户精简�
 
 test("登录时目录已存在于 describe value 层则不写入（0.1.7+ 合成视图形态）", async () => {
   const ctx = makeCtx({
-    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } },
     valueLayer: { providers: { "github-copilot": { models: [{ id: "gpt-5.4" }] } } },
   });
+  ctx.authorization.begin = async () => {
+    ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4", "gemini-3.8-flash"] } } };
+    return { status: "authorized" };
+  };
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(ctx.settings.mutateCalls.length, 0, "value 层已配置的目录应视作用户所有");
@@ -195,9 +203,12 @@ test("登录时目录已存在于 describe value 层则不写入（0.1.7+ 合成
 
 test("仅 modelOverrides 也算用户所有，登录不写入", async () => {
   const ctx = makeCtx({
-    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4"] } } },
     userLayer: { providers: { "github-copilot": { modelOverrides: { "gpt-5.4": { displayName: "我的 GPT" } } } } },
   });
+  ctx.authorization.begin = async () => {
+    ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { type: "oauth", availableModelIds: ["gpt-5.4"] } } };
+    return { status: "authorized" };
+  };
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(ctx.settings.mutateCalls.length, 0);
@@ -205,9 +216,12 @@ test("仅 modelOverrides 也算用户所有，登录不写入", async () => {
 
 test("模型同步失败时经 /status 暴露 syncError", async () => {
   const ctx = makeCtx();
-  ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } };
   ctx.script.served = [{ id: "gpt-5.4" }];
   ctx.settings.mutate = async () => { throw new Error("validation boom"); };
+  ctx.authorization.begin = async () => {
+    ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } };
+    return { status: "authorized" };
+  };
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));
   const res = await call(handler(ctx, "/status"));
@@ -220,15 +234,21 @@ test("跨站 Origin 拒绝 403，同源/无 Origin 放行", async () => {
   assert.equal((await call(handler(ctx, "/state"))).code, 200);
 });
 
+test("已有凭据时 start 拒绝 409 already-configured：不调 begin（Q21 初始授权条件）", async () => {
+  const ctx = makeCtx();
+  ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } };
+  const res = await call(handler(ctx, "/start"), { method: "POST" });
+  assert.equal(res.code, 409);
+  assert.equal(res.body.error, "already-configured");
+  assert.deepEqual(ctx.authorization.beginCalls, []);
+});
+
 // ==================== T4: 首次填充 handoff 保护 ====================
 
 test("HANDOFF_撤回后晚到的 authorized：凭据事实可见但 settings 零写入", async () => {
-  const ctx = makeCtx({
-    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } },
-    served: [{ id: "gpt-5.4" }],
-  });
+  const ctx = makeCtx({ served: [{ id: "gpt-5.4" }] });
   let settle;
-  ctx.authorization.begin = () => new Promise((r) => { settle = r; });
+  ctx.authorization.begin = () => new Promise((r) => { settle = (v) => { ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } }; r(v); }; });
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 5));
   const cancelRes = await call(handler(ctx, "/cancel"), { method: "POST" }); // V2（mock 无 cancel → unavailable）
@@ -244,13 +264,10 @@ test("HANDOFF_撤回后晚到的 authorized：凭据事实可见但 settings 零
 });
 
 test("HANDOFF_取数 await 期间意图再变：提交前复核失败，不 mutate", async () => {
-  const ctx = makeCtx({
-    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } },
-    served: [{ id: "gpt-5.4" }],
-  });
+  const ctx = makeCtx({ served: [{ id: "gpt-5.4" }] });
   let settle;
   let releaseRecord;
-  ctx.authorization.begin = () => new Promise((r) => { settle = r; });
+  ctx.authorization.begin = () => new Promise((r) => { settle = (v) => { ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } }; r(v); }; });
   ctx.credentials.readRecord = () => new Promise((r) => { releaseRecord = r; }); // 取数挂起，制造竞态窗口
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 5));
@@ -263,10 +280,11 @@ test("HANDOFF_取数 await 期间意图再变：提交前复核失败，不 muta
 });
 
 test("HANDOFF_正常授权（版本未变）：填充恰好一次", async () => {
-  const ctx = makeCtx({
-    record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } },
-    served: [{ id: "gpt-5.4" }],
-  });
+  const ctx = makeCtx({ served: [{ id: "gpt-5.4" }] });
+  ctx.authorization.begin = async () => {
+    ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } };
+    return { status: "authorized" };
+  };
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(ctx.settings.mutateCalls.length, 1);

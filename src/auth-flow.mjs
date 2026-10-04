@@ -36,12 +36,12 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
       timer = null;
     }
   };
-  const schedule = (gen, delayMs) => {
+  const schedule = (gen, delayMs, fn = () => pollTick(gen)) => {
     if (stale(gen)) return;
     clearTimer();
     timer = clock.setTimeout(() => {
       timer = null;
-      void pollTick(gen);
+      void fn();
     }, delayMs);
   };
 
@@ -100,12 +100,35 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
   async function init() {
     const gen = ++generation;
     clearTimer();
+    failures = 0;
+    backoffIdx = 0;
+    failureWindowStart = null;
+    await initAttempt(gen);
+  }
+
+  // init 内核：/status 失败时按 1/2/4/8/15 秒退避自动重试，累计 60 秒转手动；
+  // 不把加载失败伪装成「未登录」（历史缺陷：502 窗口期打开页面会显示未登录＋授权按钮）。
+  async function initAttempt(gen) {
     const status = await requestJson(fetchImpl, "/copilot-auth/status", { method: "GET" });
     if (stale(gen)) return;
     if (!status.ok) {
-      emit({ phase: "idle", error: status.error?.messageKey });
+      failures += 1;
+      if (failureWindowStart === null) failureWindowStart = clock.now();
+      const cumulative = clock.now() - failureWindowStart;
+      if (cumulative >= AUTO_RETRY_LIMIT_MS) {
+        emit({ phase: "idle", error: status.error?.messageKey, connectivity: "manual" });
+        return;
+      }
+      emit({ phase: "loading", connectivity: "retrying", error: status.error?.messageKey });
+      const delayS = BACKOFF_STEPS_S[Math.min(backoffIdx, BACKOFF_STEPS_S.length - 1)];
+      backoffIdx += 1;
+      schedule(gen, delayS * 1000, () => initAttempt(gen));
       return;
     }
+    failures = 0;
+    backoffIdx = 0;
+    failureWindowStart = null;
+    emit({ connectivity: "online" });
     const body = status.body ?? {};
     if (body.refresh?.scopeAvailable === false) {
       emit({ phase: "unavailable" });
@@ -116,14 +139,14 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
       emit({ riskLatch: body.authorization.riskLatch });
     }
     if (body.configured === true) {
-      emit({ phase: "authorized" });
+      emit({ phase: "authorized", error: undefined });
       return;
     }
     // 未配置时回查最近一次 attempt：恢复轮询或如实呈现终态
     const r = await requestJson(fetchImpl, "/copilot-auth/state", { method: "GET" });
     if (stale(gen)) return;
     if (!r.ok) {
-      emit({ phase: "idle" });
+      emit({ phase: "idle", error: r.error?.messageKey, connectivity: "manual" });
       return;
     }
     applySnapshot(gen, r.body);
@@ -143,6 +166,12 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
       return;
     }
     const errorCode = r.error?.details?.errorCode;
+    if (errorCode === "already-configured") {
+      // 后端确认已有凭据：本页是过期的未登录视图（如短暂 read-error 窗口），
+      // 直接恢复已登录视图，不发起注定失败的替换性授权
+      emit({ phase: "authorized", error: undefined, shared: false });
+      return;
+    }
     if (r.httpStatus === 409) {
       // 共同尝试：不是失败——展示 shared 并转入对现有 attempt 的轮询
       emit({ shared: true });
@@ -171,14 +200,8 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
   }
 
   function refresh() {
-    // 手动重试（60 秒上限后）：恢复自动轮询并重置失败窗口
-    const gen = ++generation;
-    clearTimer();
-    failures = 0;
-    backoffIdx = 0;
-    failureWindowStart = null;
-    emit({ connectivity: "online" });
-    void pollTick(gen);
+    // 手动「查询状态」：完整重跑 init（status→state），可从过期的未登录/失败视图恢复
+    void init();
   }
 
   function dispose() {
