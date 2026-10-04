@@ -360,7 +360,9 @@ function RefreshModal({ t, flow, materializing, onSelect, onConfirm, onCancel, o
           {flow.staleNotice && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
           <p style={styles.modalText}>{sourceLine}</p>
           {p.evidence?.stale === true && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
-          {materializing && <p style={styles.banner}>ⓘ {t("refreshing")}</p>}
+          {/* 常驻占位行：物化指示只做显隐（visibility），不插入/移除节点——
+              否则每次物化把整卡内容下压再弹回（v1.2.13 遗留的上下弹跳根因） */}
+          <p style={{ ...styles.banner, minHeight: 20, visibility: materializing ? "visible" : "hidden" }}>ⓘ {t("refreshing")}</p>
         </div>
         <div style={{ flex: 1, overflowY: "auto", minHeight: 0, scrollbarGutter: "stable", padding: "0 20px", opacity: materializing ? 0.55 : 1, pointerEvents: materializing ? "none" : "auto" }}>
         {!isRebuild && (
