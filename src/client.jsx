@@ -308,7 +308,7 @@ function sampleThemeSurface() {
 // 空目标单独确认）。选择变化经 onSelect → 服务端从原快照 materialize（不重新取数）；
 // stale 证据只展示参考且禁用应用（Q7）；危险确认阶段初始焦点在取消、可取消阶段
 // Esc 等价取消（设计§5）；技术详情默认折叠（G04）。
-function RefreshModal({ t, flow, materializing, onSelect, onConfirm, onCancel, onOverlay }) {
+function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
   const p = flow.preview;
   const diff = p.diff ?? {};
   const isRebuild = p.operation === "rebuild";
@@ -354,29 +354,17 @@ function RefreshModal({ t, flow, materializing, onSelect, onConfirm, onCancel, o
     <div style={styles.modalMask} role="dialog" aria-modal="true" onKeyDown={escCancel}>
       {/* 固定高度＋三段式（头部/可滚动内容/常驻操作栏）：勾选与物化往返不再
           改变卡片尺寸——主人 2026-10-05 反馈的「卡片变大缩小闪眼睛」修复 */}
-      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, height: "min(80vh, 680px)", padding: 0, overflow: "hidden", position: "relative" }}>
-        {/* 物化指示＝右上角浮层：绝对定位不占布局流（透明度渐显渐隐）——
-            占位行方案不位移但留空行，浮层两全（v1.2.15） */}
-        <div
-          style={{
-            position: "absolute", top: 16, right: 20, zIndex: 2,
-            display: "flex", alignItems: "center", gap: 6, padding: "3px 12px",
-            borderRadius: 999, border: "1px solid rgba(128,128,128,0.35)",
-            background: surface.current.bg, color: "#f59f00",
-            fontSize: 12, lineHeight: "18px", whiteSpace: "nowrap",
-            opacity: materializing ? 1 : 0, transition: "opacity 150ms ease",
-            pointerEvents: "none",
-          }}
-        >
-          ⓘ {t("refreshing")}
-        </div>
+      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, height: "min(80vh, 680px)", padding: 0, overflow: "hidden" }}>
+        {/* 物化期间不渲染任何指示（v1.2.16）：勾选为乐观即时反馈、物化通常亚秒
+            完成，任何显隐指示都会构成闪烁；物化中误点「应用更改」由状态机安全
+            忽略（materializing 时不接受 confirm，防旧 previewId 提交） */}
         <div style={{ padding: "18px 20px 6px" }}>
           <h4 style={styles.modalTitle}>{t(isRebuild ? "rebuildTitle" : "supplementTitle")}</h4>
           {flow.staleNotice && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
           <p style={styles.modalText}>{sourceLine}</p>
           {p.evidence?.stale === true && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
         </div>
-        <div style={{ flex: 1, overflowY: "auto", minHeight: 0, scrollbarGutter: "stable", padding: "0 20px", opacity: materializing ? 0.55 : 1, pointerEvents: materializing ? "none" : "auto" }}>
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0, scrollbarGutter: "stable", padding: "0 20px" }}>
         {!isRebuild && (
           <>
             <p style={styles.modalText}>
@@ -444,8 +432,8 @@ function RefreshModal({ t, flow, materializing, onSelect, onConfirm, onCancel, o
             <button ref={cancelRef} type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
             <button
               type="button"
-              style={{ ...styles.button, ...styles.primary, ...((p.evidence?.stale === true || materializing) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-              disabled={p.evidence?.stale === true || materializing}
+              style={{ ...styles.button, ...styles.primary, ...((p.evidence?.stale === true) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+              disabled={p.evidence?.stale === true}
               onClick={confirmClick}
             >
               {t("applyChanges")}
@@ -756,7 +744,6 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
         <RefreshModal
           t={t}
           flow={flow}
-          materializing={flow.materializing === true}
           onSelect={(selectedIds) => drive({ type: "select", selectedIds })}
           onConfirm={(opts) => drive({ type: "confirm", ...opts })}
           onCancel={() => drive({ type: "cancel" })}
