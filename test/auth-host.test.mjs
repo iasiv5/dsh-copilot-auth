@@ -23,7 +23,10 @@ function makeHarness({ begin, cancelFn } = {}) {
       begin: async (req) => { calls.begin++; return begin ? begin(req, h) : { status: "authorized" }; },
       ...(cancelFn !== undefined ? { cancel: async (k) => { calls.cancel++; return cancelFn(k); } } : {}),
     },
-    credentials: { describeRecord: async () => ({ configured: h.credentialsPresent === true }) },
+    credentials: {
+      describeRecord: async () => ({ configured: h.credentialsPresent === true }),
+      deleteRecord: async () => { h.deleteCalls = (h.deleteCalls ?? 0) + 1; h.credentialsPresent = false; return true; },
+    },
   };
   const h = {
     calls, clock, handoffs, intentIO,
@@ -93,9 +96,54 @@ test("AUTH_cancel：无 cancel 实现时 delivery=unavailable 且 begin 未被�
   assert.equal(h.calls.begin, 1);
 });
 
-test("AUTH_logout：一律拒绝 LOGOUT_UNAVAILABLE（不触碰凭据）", () => {
+test("AUTH_logout：静止状态（无尝试/无锁存）→ deleteRecord＋删后核实＋bump 意图", async () => {
   const h = makeHarness();
-  assert.throws(() => h.controller.logout(), (e) => e.code === "LOGOUT_UNAVAILABLE");
+  h.credentialsPresent = true;
+  const v0 = h.intentIO.version;
+  const r = await h.controller.logout();
+  assert.deepEqual(r, { ok: true });
+  assert.equal(h.deleteCalls, 1);
+  assert.equal(h.credentialsPresent, false, "凭据已删除");
+  assert.equal(h.intentIO.version, v0 + 1, "退出先 bump 本 profile 意图版本");
+  const info = await h.credentials.describeRecord();
+  assert.equal(info.configured, false, "删后核实：凭据确实不在");
+});
+
+test("AUTH_logout：进行中尝试（begin 晚写窗口）拒绝 ATTEMPT_RUNNING，不触碰凭据", async () => {
+  const h = makeHarness({ begin: () => new Promise(() => {}) });
+  await h.controller.start();
+  await new Promise((r) => setTimeout(r, 5));
+  h.credentialsPresent = true; // 模拟晚到写：尝试进行中凭据出现
+  await assert.rejects(() => h.controller.logout(), (e) => e.code === "ATTEMPT_RUNNING");
+  assert.equal(h.deleteCalls ?? 0, 0);
+});
+
+test("AUTH_logout：风险锁存期（撤回/超时未核实）拒绝 LOGOUT_UNSAFE", async () => {
+  const h = makeHarness({ begin: () => new Promise(() => {}) });
+  await h.controller.start(); // 未登录状态下的尝试（already-configured 门不拦）
+  await h.controller.cancel(); // 设 riskLatch
+  h.credentialsPresent = true; // 模拟晚到写：锁存期内凭据出现
+  await assert.rejects(() => h.controller.logout(), (e) => e.code === "LOGOUT_UNSAFE");
+  assert.equal(h.deleteCalls ?? 0, 0);
+});
+
+test("AUTH_logout：删除后凭据仍在（晚到写）→ LOGOUT_FAILED 不伪报成功", async () => {
+  const h = makeHarness();
+  h.credentialsPresent = true;
+  h.credentials.describeRecord = async () => ({ configured: true }); // 晚到写把凭据写了回来
+  await assert.rejects(() => h.controller.logout(), (e) => e.code === "LOGOUT_FAILED");
+  assert.equal(h.deleteCalls, 1);
+});
+
+test("AUTH_logout：deleteRecord 失败/返回 false → LOGOUT_FAILED", async () => {
+  const h = makeHarness();
+  h.credentialsPresent = true;
+  h.credentials.deleteRecord = async () => false;
+  await assert.rejects(() => h.controller.logout(), (e) => e.code === "LOGOUT_FAILED");
+  const h2 = makeHarness();
+  h2.credentialsPresent = true;
+  h2.credentials.deleteRecord = async () => { throw new Error("boom"); };
+  await assert.rejects(() => h2.controller.logout(), (e) => e.code === "LOGOUT_FAILED");
 });
 
 test("AUTH_outcome_cancelled：状态 withdrawal-pending-unverified 且设锁存（不再映射 failed）", async () => {

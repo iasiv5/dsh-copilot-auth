@@ -250,6 +250,34 @@ test("start 收到 409 already-configured：恢复 authorized，不轮询不报�
   assert.equal(http.calls.filter((c) => c === "/copilot-auth/state").length, 0, "不发起对 attempt 的轮询");
 });
 
+test("logout：成功后完整重跑 init → 未登录；失败回到 authorized 并保留 logoutError", async () => {
+  const http = makeFetch();
+  const clock = fakeClock();
+  const states = [];
+  http.respond("/copilot-auth/status", { body: JSON.stringify({ configured: true }) });
+  http.respond("/copilot-auth/logout", { status: 200, body: JSON.stringify({ ok: true }) });
+  const flow = createAuthFlow({ fetchImpl: http.fetchImpl, clock, onState: (s) => states.push(s) });
+  await flow.init();
+  assert.equal(states.at(-1).phase, "authorized");
+  http.respond("/copilot-auth/status", { body: JSON.stringify({ configured: false }) }); // 凭据已删除
+  http.respond("/copilot-auth/state", { body: JSON.stringify({ attemptId: null, status: "idle", riskLatch: null }) });
+  await flow.logout(); // 成功 → init 重跑：status configured:false → state idle
+  await tick();
+  assert.equal(http.calls.filter((c) => c === "/copilot-auth/logout").length, 1, "写操作不自动重发");
+  assert.equal(states.at(-1).phase, "idle", "退出后如实回到未登录");
+
+  const http2 = makeFetch();
+  const states2 = [];
+  http2.respond("/copilot-auth/status", { body: JSON.stringify({ configured: true }) });
+  http2.respond("/copilot-auth/logout", { status: 409, body: JSON.stringify({ ok: false, error: "logout-failed" }) });
+  const flow2 = createAuthFlow({ fetchImpl: http2.fetchImpl, clock, onState: (s) => states2.push(s) });
+  await flow2.init();
+  await flow2.logout();
+  await tick();
+  assert.equal(states2.at(-1).phase, "authorized");
+  assert.equal(states2.at(-1).logoutError, "logout-failed");
+});
+
 test("WIRING_client.jsx：createAuthFlow 必须显式注入 fetchImpl", () => {
   // 回归锚：v1.2.8 漏传 fetchImpl → requestJson 把 TypeError 吞成 network-error →
   // 授权页恒「未登录」、点登录恒「失败」且不发出任何请求（2026-10-04 实机实证）。

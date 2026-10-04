@@ -9,7 +9,7 @@ import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { CREDENTIAL_KEY, PROTOCOL_VERSION, routes } from "./shared.mjs";
 import { readJson, writeJsonAtomic, createMutex } from "./atomic-json.mjs";
-import { createAuthorizationController, sanitizeAuthError } from "./auth-host.mjs";
+import { createAuthorizationController, sanitizeAuthError, LIVE_STATUSES } from "./auth-host.mjs";
 import { resolveRuntimeScope } from "./runtime-scope.mjs";
 import { mergeCatalog, digest, findPiAiInstallation, classifyCatalogTarget, normalizeRemoteCatalog, catalogShapeKeys } from "./catalog.mjs";
 import { fetchLatestCatalog } from "./catalog-fetch.mjs";
@@ -569,6 +569,12 @@ export function apply(ctx, opts = {}) {
         credential = "read-error";
       }
       const authSnapshot = controller.snapshot();
+      // 退出可用性（v1.2.10）：无进行中尝试且无风险锁存才可安全删除凭据；
+      // 重新授权恒不可用（等价于退出＋登录，请分步执行）
+      const logoutAvailable = !authSnapshot.riskLatch
+        && !LIVE_STATUSES.includes(authSnapshot.status)
+        && authSnapshot.status !== "withdrawal-pending-unverified"
+        && authSnapshot.status !== "timed-out-unverified";
       // refresh 块：只读聚合（通道分类来自启动期缓存；GET 不执行写探针，Q23）
       const loaded = loadRefreshState(scope, { legacyPath });
       const st = loaded.flags.unknownVersion ? null : loaded.state;
@@ -623,7 +629,7 @@ export function apply(ctx, opts = {}) {
           credential,
           attempt: authSnapshot,
           riskLatch: authSnapshot.riskLatch,
-          capabilities: { logout: false, reauthorize: false },
+          capabilities: { logout: logoutAvailable, reauthorize: false },
         },
         refresh,
         ...(operation ? { operation } : {}),
@@ -631,13 +637,35 @@ export function apply(ctx, opts = {}) {
     },
   });
 
-  // 退出登录：当前宿主桥接无法证明安全退出（D-01），统一拒绝且绝不 deleteRecord。
+  // 退出登录（v1.2.10）：无进行中尝试且无风险锁存时执行凭据删除＋删后核实；
+  // 进行中尝试（begin 晚写窗口）与风险锁存期（撤回/超时未核实）一律拒绝。
   ctx.webServer.register({
     kind: "exact",
     path: r.logout,
-    handler: (req, res) => {
+    handler: async (req, res) => {
       if (!guard(req, res, "POST")) return;
-      json(res, 403, { ok: false, error: "logout-safety-unavailable" });
+      if (!scope.known) {
+        json(res, 503, { ok: false, error: "scope-unavailable" });
+        return;
+      }
+      try {
+        await controller.logout();
+        json(res, 200, { ok: true });
+      } catch (err) {
+        if (err?.code === "ATTEMPT_RUNNING") {
+          json(res, 409, { ok: false, error: "already running", attemptId: err.attemptId });
+          return;
+        }
+        if (err?.code === "LOGOUT_UNSAFE") {
+          json(res, 409, { ok: false, error: "logout-unsafe" });
+          return;
+        }
+        if (err?.code === "LOGOUT_FAILED") {
+          json(res, 409, { ok: false, error: "logout-failed" });
+          return;
+        }
+        json(res, 500, { ok: false, error: sanitizeAuthError(err) });
+      }
     },
   });
 

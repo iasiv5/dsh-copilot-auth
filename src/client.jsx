@@ -45,6 +45,9 @@ const DICTS = {
     errGateway: "Gateway error: the DSH service may be restarting. Retrying automatically.",
     errBadResponse: "Unexpected response from the authorization service.",
     errHttp: "The authorization request failed. Check status and retry.",
+    logoutScope: "This removes Copilot authorization from this credential store and affects other instances using it. It does not delete your GitHub account.",
+    logoutFailed: "Sign-out did not complete; authorization credentials may remain. Please retry.",
+    reauthHint: "Reauthorize is unavailable. Sign out first, then sign in again.",
     // ---- Model management (protocol v2, design §5) ----
     supplement: "Add models",
     rebuild: "Rebuild model list",
@@ -127,6 +130,9 @@ const DICTS = {
     errGateway: "网关错误：DSH 服务可能正在重启，正在自动重试。",
     errBadResponse: "授权服务返回异常响应。",
     errHttp: "授权请求失败。请查询状态后重试。",
+    logoutScope: "将清除此凭据库中的 Copilot 授权，使用同一凭据库的其他实例也会受到影响。此操作不注销 GitHub 账号。",
+    logoutFailed: "退出登录未完成，授权凭据仍可能存在。请重试。",
+    reauthHint: "重新授权暂不可用：请先退出登录，再重新授权。",
     // ---- 模型管理（协议 v2，设计§5） ----
     supplement: "补充模型",
     rebuild: "重建模型列表",
@@ -445,11 +451,34 @@ function RetireDialog({ t, onConfirm, onCancel }) {
   );
 }
 
+// 通用确认弹窗（退出登录等危险确认）：默认焦点在取消；Esc 等价取消（设计§5）。
+function ConfirmDialog({ title, body, confirmText, cancelText, onConfirm, onCancel }) {
+  const cancelRef = useRef(null);
+  const surface = useRef(null);
+  if (!surface.current) surface.current = sampleThemeSurface();
+  useEffect(() => {
+    cancelRef.current?.focus();
+  }, []);
+  return (
+    <div style={styles.modalMask} role="dialog" aria-modal="true" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
+      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, maxWidth: 460 }}>
+        <h4 style={styles.modalTitle}>{title}</h4>
+        <p style={styles.modalText}>{body}</p>
+        <div style={styles.modalActions}>
+          <button ref={cancelRef} type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{cancelText}</button>
+          <button type="button" style={{ ...styles.button, ...styles.primary }} onClick={onConfirm}>{confirmText}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
   // 授权区：唯一驱动入口是 authFlow（串行控制器，T5）；刷新区沿用 refresh-flow（T11 改造）。
   const [auth, setAuth] = useState({ phase: "loading", connectivity: "online", shared: false });
   const [copied, setCopied] = useState(false);
   const [copyFail, setCopyFail] = useState(false);
+  const [logoutConfirm, setLogoutConfirm] = useState(false);
   const [flow, setFlow] = useState(refreshInitial);
   const flowRef = useRef(flow);
   const authFlowRef = useRef(null);
@@ -489,6 +518,10 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
   };
   const checkStatus = () => {
     void authFlowRef.current?.refresh();
+  };
+  const doLogout = () => {
+    setLogoutConfirm(false);
+    void authFlowRef.current?.logout(); // 退出登录：单次调用，删后由 init 复核真实状态
   };
 
   const copyCode = async (code) => {
@@ -587,9 +620,22 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
       {phase === "authorized" && (
         <div style={styles.card}>
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-            {/* 退出/重新授权：当前宿主无法证明安全（D-01），统一禁用并说明 */}
-            <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("authUnsafe")}>{t("logout")}</button>
-            <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("authUnsafe")}>{t("reauthorize")}</button>
+            {/* 退出登录（v1.2.10）：服务端确认无进行中尝试且无风险锁存时才可用，
+                点击后经确认弹窗（logoutScope）执行凭据删除＋删后核实。
+                重新授权恒禁用：等价于退出＋登录，请分步执行。 */}
+            {(() => {
+              const logoutAvailable = auth.status?.authorization?.capabilities?.logout === true;
+              return (
+                <button
+                  type="button"
+                  style={{ ...styles.button, ...styles.secondary, ...(logoutAvailable ? null : { opacity: 0.5, cursor: "not-allowed" }) }}
+                  disabled={!logoutAvailable}
+                  title={logoutAvailable ? t("logoutScope") : t("authUnsafe")}
+                  onClick={() => setLogoutConfirm(true)}
+                >{t("logout")}</button>
+              );
+            })()}
+            <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("reauthHint")}>{t("reauthorize")}</button>
             {(["previewing", "applying", "checking", "retiring"].includes(flow.name)) ? (
               <button type="button" style={{ ...styles.button, ...styles.primary, opacity: 0.5 }} disabled>
                 {flow.name === "applying" ? t("applying") : t("refreshing")}
@@ -615,7 +661,10 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
               </>
             )}
           </div>
-          <p style={styles.banner}>ⓘ {t("authUnsafe")}</p>
+          <p style={styles.banner}>ⓘ {t("reauthHint")}</p>
+          {auth.logoutError && (
+            <p style={styles.error}>⚠ {auth.logoutError === "logout-unsafe" ? t("authUnsafe") : t("logoutFailed")}</p>
+          )}
           {refreshBlocked(flow.flags) && (
             <p style={styles.banner}>⚠ {blockedReasonText(t, flow.flags)}</p>
           )}
@@ -691,6 +740,16 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
           t={t}
           onConfirm={() => drive({ type: "retire-confirm" })}
           onCancel={() => drive({ type: "cancel" })}
+        />
+      )}
+      {logoutConfirm && (
+        <ConfirmDialog
+          title={t("logout")}
+          body={t("logoutScope")}
+          confirmText={t("logout")}
+          cancelText={t("cancel")}
+          onCancel={() => setLogoutConfirm(false)}
+          onConfirm={doLogout}
         />
       )}
       {(phase === "idle" || phase === "failed") && (

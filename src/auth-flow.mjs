@@ -199,6 +199,27 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
     emit({ withdrawalDelivery: "failed", error: r.error?.details?.errorCode ?? r.error?.messageKey });
   }
 
+  async function logout() {
+    // 退出登录（写操作，单次调用）：pending 态 → 成功后完整重跑 init 恢复真实
+    // 状态（若晚到写把凭据写了回来，init 会如实显示 authorized，绝不伪报已退出）；
+    // 失败回到 authorized 并保留 logoutError 供 UI 分层展示。
+    const gen = ++generation;
+    clearTimer();
+    failures = 0;
+    backoffIdx = 0;
+    failureWindowStart = null;
+    emit({ phase: "loading", logoutError: undefined });
+    const r = await requestJson(fetchImpl, "/copilot-auth/logout", { method: "POST" });
+    if (stale(gen)) return;
+    if (!r.ok) {
+      const code = r.error?.details?.errorCode;
+      emit({ phase: "authorized", logoutError: code ?? r.error?.messageKey ?? "logout-failed" });
+      return;
+    }
+    emit({ logoutError: undefined });
+    await initAttempt(gen);
+  }
+
   function refresh() {
     // 手动「查询状态」：完整重跑 init（status→state），可从过期的未登录/失败视图恢复
     void init();
@@ -209,5 +230,5 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
     clearTimer();
   }
 
-  return { init, start, cancel, refresh, dispose };
+  return { init, start, cancel, logout, refresh, dispose };
 }

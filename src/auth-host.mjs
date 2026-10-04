@@ -10,7 +10,8 @@ import { randomUUID } from "node:crypto";
 import { CREDENTIAL_KEY } from "./shared.mjs";
 
 export const WAIT_LIMIT_MS = 15 * 60 * 1000;
-const LIVE_STATUSES = ["starting", "waiting", "finishing"];
+// 进行中的授权尝试状态：begin 的晚写窗口，期间退出/撤回类操作一律拒绝
+export const LIVE_STATUSES = ["starting", "waiting", "finishing"];
 
 // 授权错误脱敏：仅保留安全字符集（字母/数字/空格/点/冒号/逗号/连字符），
 // 阻断上游异常文本或疑似 token（含 = ; / + _ 等的串）进入状态面。
@@ -147,9 +148,33 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
     return { withdrawalDelivery };
   }
 
-  function logout() {
-    // 当前宿主无法证明安全退出（D-01）：统一拒绝，不调用 deleteRecord
-    throw authError("LOGOUT_UNAVAILABLE", "logout-safety-unavailable");
+  async function logout() {
+    // 退出安全条件（v1.2.10 起，经主人裁决替代 D-01 全禁策略）：
+    // ① 无进行中的授权尝试（begin 晚写窗口）② 无风险锁存（撤回/超时未核实）。
+    // 满足后凭据库视为静止：deleteRecord＋删除后 describe 复核；晚到写无法绝对
+    // 排除，以复核与状态页如实展示兜底——退出未核实成功绝不伪报成功。
+    requireScope();
+    if (attempt && LIVE_STATUSES.includes(attempt.status)) {
+      throw authError("ATTEMPT_RUNNING", "already running", { attemptId: attempt.attemptId });
+    }
+    if (riskLatch) throw authError("LOGOUT_UNSAFE", "logout-unsafe");
+    // 本 profile 显式操作：旧预览/模型配置意图先行失效（失败则不动凭据）
+    intentIO.bump();
+    try {
+      const deleted = await ctx.credentials.deleteRecord(CREDENTIAL_KEY);
+      if (deleted === false) throw authError("LOGOUT_FAILED", "logout-failed");
+    } catch (err) {
+      if (err?.code === "LOGOUT_FAILED") throw err;
+      throw authError("LOGOUT_FAILED", "logout-failed");
+    }
+    try {
+      const info = await ctx.credentials.describeRecord(CREDENTIAL_KEY);
+      if (info?.configured === true) throw authError("LOGOUT_FAILED", "logout-failed");
+    } catch (err) {
+      if (err?.code === "LOGOUT_FAILED") throw err;
+      throw authError("LOGOUT_FAILED", "logout-failed");
+    }
+    return { ok: true };
   }
 
   function snapshot() {

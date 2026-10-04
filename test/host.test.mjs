@@ -128,18 +128,42 @@ test("设备码 notice 经 state 可见；waiting 期间二次 start 返回 409"
   assert.equal(again.code, 409);
 });
 
-test("status 与 logout 操作固定 credential key", async () => {
+test("status 与 logout 操作固定 credential key；静止态退出可用并真实删除", async () => {
   const ctx = makeCtx();
   ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant" } };
   const status = await call(handler(ctx, "/status"));
   assert.equal(status.body.configured, true);
   assert.equal(status.body.authorization.credential, "present");
-  assert.deepEqual(status.body.authorization.capabilities, { logout: false, reauthorize: false });
-  // T3 契约：退出统一拒绝（logout-safety-unavailable），绝不 deleteRecord。
+  // v1.2.10：静止态（无尝试/无锁存）退出可用；重新授权恒禁用
+  assert.deepEqual(status.body.authorization.capabilities, { logout: true, reauthorize: false });
   const out = await call(handler(ctx, "/logout"), { method: "POST" });
-  assert.equal(out.code, 403);
-  assert.equal(out.body.error, "logout-safety-unavailable");
+  assert.equal(out.code, 200);
+  assert.deepEqual(out.body, { ok: true });
+  assert.deepEqual(ctx.credentials.deleteRecordCalls, ["llm-pi-ai/github-copilot"]);
+  const after = await call(handler(ctx, "/status"));
+  assert.equal(after.body.configured, false, "退出后凭据不在（删后核实）");
+});
+
+test("logout 安全门：进行中尝试与风险锁存期拒绝，status capabilities 如实降级", async () => {
+  // 进行中尝试：POST /start 后 attempt starting → logout 409
+  const ctx = makeCtx();
+  ctx.authorization.begin = () => new Promise(() => {});
+  await call(handler(ctx, "/start"), { method: "POST" });
+  const statusLive = await call(handler(ctx, "/status"));
+  assert.equal(statusLive.body.authorization.capabilities.logout, false, "尝试进行中退出不可用");
+  const out = await call(handler(ctx, "/logout"), { method: "POST" });
+  assert.equal(out.code, 409);
+  assert.equal(out.body.error, "already running");
   assert.deepEqual(ctx.credentials.deleteRecordCalls, []);
+  // 风险锁存：cancelled 结局设锁存 → logout 409 logout-unsafe
+  const ctx2 = makeCtx();
+  ctx2.authorization.begin = async () => ({ status: "cancelled" });
+  await call(handler(ctx2, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  const out2 = await call(handler(ctx2, "/logout"), { method: "POST" });
+  assert.equal(out2.code, 409);
+  assert.equal(out2.body.error, "logout-unsafe");
+  assert.deepEqual(ctx2.credentials.deleteRecordCalls, []);
 });
 
 test("scope known=false（缺 profileContext）：写路由 503，status 带 scopeAvailable:false 且不伪成功", async () => {
