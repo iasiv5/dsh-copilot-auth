@@ -3,7 +3,8 @@
 // 契约见 docs/plans/2026-10-04-copilot-auth-models-unified-implementation-plan.md：
 //  - start：先 intentIO.bump() 持久 intentVersion+1（失败不发 begin），再 begin；202 先行语义保留
 //  - cancel：先 bump，再调用宿主撤销（invoked/unavailable/failed），设进程内 riskLatch
-//  - logout/reauthorize：一律拒绝 logout-safety-unavailable，绝不 deleteRecord
+//  - logout：静止态（无 LIVE attempt＋无 riskLatch）deleteRecord＋删后核实；
+//    尝试进行中/风险锁存期拒绝。「重新授权」概念随 v1.2.11 移除（退出＋登录分步即可）
 //  - onAuthorized(handoff) 仅在 outcome=authorized 且 originIntentVersion 仍当前且无撤回/超时标记时触发
 //  - riskLatch 进程级：重挂/dispose 不清；15 分钟等待超时由 snapshot 以注入 clock 惰性判定
 import { randomUUID } from "node:crypto";

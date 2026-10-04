@@ -24,7 +24,6 @@ const DICTS = {
     loading: "…",
     login: "Sign in",
     logout: "Sign out",
-    reauthorize: "Reauthorize",
     withdrawAuth: "Request withdrawal",
     withdrawal: "Withdrawal requested; the outcome remains unverified.",
     withdrawalUnavailable: "The withdrawal request could not be sent to the host; the outcome remains unverified.",
@@ -47,7 +46,6 @@ const DICTS = {
     errHttp: "The authorization request failed. Check status and retry.",
     logoutScope: "This removes Copilot authorization from this credential store and affects other instances using it. It does not delete your GitHub account.",
     logoutFailed: "Sign-out did not complete; authorization credentials may remain. Please retry.",
-    reauthHint: "Reauthorize is unavailable. Sign out first, then sign in again.",
     // ---- Model management (protocol v2, design §5) ----
     supplement: "Add models",
     rebuild: "Rebuild model list",
@@ -110,7 +108,6 @@ const DICTS = {
     loading: "…",
     login: "授权登录",
     logout: "退出登录",
-    reauthorize: "重新授权",
     withdrawAuth: "请求撤回",
     withdrawal: "撤回请求已发送，结果仍待核实。",
     withdrawalUnavailable: "未能向宿主发送撤回请求，结果仍待核实。",
@@ -132,7 +129,6 @@ const DICTS = {
     errHttp: "授权请求失败。请查询状态后重试。",
     logoutScope: "将清除此凭据库中的 Copilot 授权，使用同一凭据库的其他实例也会受到影响。此操作不注销 GitHub 账号。",
     logoutFailed: "退出登录未完成，授权凭据仍可能存在。请重试。",
-    reauthHint: "重新授权暂不可用：请先退出登录，再重新授权。",
     // ---- 模型管理（协议 v2，设计§5） ----
     supplement: "补充模型",
     rebuild: "重建模型列表",
@@ -622,7 +618,8 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
           <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
             {/* 退出登录（v1.2.10）：服务端确认无进行中尝试且无风险锁存时才可用，
                 点击后经确认弹窗（logoutScope）执行凭据删除＋删后核实。
-                重新授权恒禁用：等价于退出＋登录，请分步执行。 */}
+                「重新授权」按钮已移除（v1.2.11）：已登录只需退出登录，未登录
+                入口本就是「授权登录」——独立的重新授权属逻辑冗余。 */}
             {(() => {
               const logoutAvailable = auth.status?.authorization?.capabilities?.logout === true;
               return (
@@ -635,7 +632,6 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
                 >{t("logout")}</button>
               );
             })()}
-            <button type="button" style={{ ...styles.button, ...styles.secondary, opacity: 0.5, cursor: "not-allowed" }} disabled title={t("reauthHint")}>{t("reauthorize")}</button>
             {(["previewing", "applying", "checking", "retiring"].includes(flow.name)) ? (
               <button type="button" style={{ ...styles.button, ...styles.primary, opacity: 0.5 }} disabled>
                 {flow.name === "applying" ? t("applying") : t("refreshing")}
@@ -661,7 +657,6 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
               </>
             )}
           </div>
-          <p style={styles.banner}>ⓘ {t("reauthHint")}</p>
           {auth.logoutError && (
             <p style={styles.error}>⚠ {auth.logoutError === "logout-unsafe" ? t("authUnsafe") : t("logoutFailed")}</p>
           )}

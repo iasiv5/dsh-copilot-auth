@@ -134,8 +134,8 @@ test("status 与 logout 操作固定 credential key；静止态退出可用并�
   const status = await call(handler(ctx, "/status"));
   assert.equal(status.body.configured, true);
   assert.equal(status.body.authorization.credential, "present");
-  // v1.2.10：静止态（无尝试/无锁存）退出可用；重新授权恒禁用
-  assert.deepEqual(status.body.authorization.capabilities, { logout: true, reauthorize: false });
+  // v1.2.10：静止态（无尝试/无锁存）退出可用；能力位自 v1.2.11 起只含 logout
+  assert.deepEqual(status.body.authorization.capabilities, { logout: true });
   const out = await call(handler(ctx, "/logout"), { method: "POST" });
   assert.equal(out.code, 200);
   assert.deepEqual(out.body, { ok: true });

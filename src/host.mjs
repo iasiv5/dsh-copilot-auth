@@ -569,8 +569,9 @@ export function apply(ctx, opts = {}) {
         credential = "read-error";
       }
       const authSnapshot = controller.snapshot();
-      // 退出可用性（v1.2.10）：无进行中尝试且无风险锁存才可安全删除凭据；
-      // 重新授权恒不可用（等价于退出＋登录，请分步执行）
+      // 退出可用性（v1.2.10）：无进行中尝试且无风险锁存才可安全删除凭据。
+      // 「重新授权」能力位随 v1.2.11 移除——已登录只需退出登录，未登录入口
+      // 本就是「授权登录」，独立按钮属逻辑冗余（主人 2026-10-05 裁决）。
       const logoutAvailable = !authSnapshot.riskLatch
         && !LIVE_STATUSES.includes(authSnapshot.status)
         && authSnapshot.status !== "withdrawal-pending-unverified"
@@ -629,7 +630,7 @@ export function apply(ctx, opts = {}) {
           credential,
           attempt: authSnapshot,
           riskLatch: authSnapshot.riskLatch,
-          capabilities: { logout: logoutAvailable, reauthorize: false },
+          capabilities: { logout: logoutAvailable },
         },
         refresh,
         ...(operation ? { operation } : {}),
