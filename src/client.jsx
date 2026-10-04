@@ -308,13 +308,17 @@ function sampleThemeSurface() {
 // 空目标单独确认）。选择变化经 onSelect → 服务端从原快照 materialize（不重新取数）；
 // stale 证据只展示参考且禁用应用（Q7）；危险确认阶段初始焦点在取消、可取消阶段
 // Esc 等价取消（设计§5）；技术详情默认折叠（G04）。
-function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
+function RefreshModal({ t, flow, materializing, onSelect, onConfirm, onCancel, onOverlay }) {
   const p = flow.preview;
   const diff = p.diff ?? {};
   const isRebuild = p.operation === "rebuild";
   const emptyTarget = isRebuild && (diff.targetView?.models ?? []).length === 0;
   const candidates = diff.candidates ?? [];
-  const selectedIds = new Set(diff.added ?? []);
+  // 乐观勾选：点击即更新本地视图，服务端 materialize 回显到达后清空覆盖
+  const [localSel, setLocalSel] = useState(null); // Set | null
+  useEffect(() => { setLocalSel(null); }, [p.diff]);
+  const selectedIds = new Set(localSel ?? (diff.added ?? []));
+  const emitSel = (ids) => { setLocalSel(new Set(ids)); onSelect(ids); };
   const [stage, setStage] = useState(0); // 0 常规｜1 已警示待二次确认｜2 已警示待清空确认
   const cancelRef = useRef(null);
   const surface = useRef(null);
@@ -348,11 +352,17 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
     );
   return (
     <div style={styles.modalMask} role="dialog" aria-modal="true" onKeyDown={escCancel}>
-      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg }}>
-        <h4 style={styles.modalTitle}>{t(isRebuild ? "rebuildTitle" : "supplementTitle")}</h4>
-        {flow.staleNotice && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
-        <p style={styles.modalText}>{sourceLine}</p>
-        {p.evidence?.stale === true && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
+      {/* 固定高度＋三段式（头部/可滚动内容/常驻操作栏）：勾选与物化往返不再
+          改变卡片尺寸——主人 2026-10-05 反馈的「卡片变大缩小闪眼睛」修复 */}
+      <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, height: "min(80vh, 680px)", padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "18px 20px 6px" }}>
+          <h4 style={styles.modalTitle}>{t(isRebuild ? "rebuildTitle" : "supplementTitle")}</h4>
+          {flow.staleNotice && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
+          <p style={styles.modalText}>{sourceLine}</p>
+          {p.evidence?.stale === true && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
+          {materializing && <p style={styles.banner}>ⓘ {t("refreshing")}</p>}
+        </div>
+        <div style={{ flex: 1, overflowY: "auto", minHeight: 0, scrollbarGutter: "stable", padding: "0 20px", opacity: materializing ? 0.55 : 1, pointerEvents: materializing ? "none" : "auto" }}>
         {!isRebuild && (
           <>
             <p style={styles.modalText}>
@@ -361,7 +371,7 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
                 // 全选/取消全选互斥切换：全选中→取消全选；有任一未勾选（含部分勾选）→全选
                 const allSelected = candidates.every((id) => selectedIds.has(id));
                 return (
-                  <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, marginLeft: 10, fontSize: 12 }} onClick={() => onSelect(allSelected ? [] : candidates)}>
+                  <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, marginLeft: 10, fontSize: 12 }} onClick={() => emitSel(allSelected ? [] : candidates)}>
                     {allSelected ? t("selectNone") : t("selectAll")}
                   </button>
                 );
@@ -373,7 +383,7 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
                   const next = new Set(selectedIds);
                   if (next.has(id)) next.delete(id);
                   else next.add(id);
-                  onSelect([...next]);
+                  emitSel([...next]);
                 }} />
                 <span>{id}</span>
               </label>
@@ -409,21 +419,24 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
             <span style={{ ...styles.mono, fontSize: 12 }}>{p.catalogError}</span>
           </details>
         )}
-        <div style={styles.modalActions}>
-          {p.catalogSource === "local" && (
-            <button type="button" style={{ ...styles.button, ...styles.secondary, marginRight: "auto" }} onClick={onOverlay}>
-              {t("overlayBtn")}
+        </div>
+        <div style={{ padding: "8px 20px 16px" }}>
+          <div style={styles.modalActions}>
+            {p.catalogSource === "local" && (
+              <button type="button" style={{ ...styles.button, ...styles.secondary, marginRight: "auto" }} onClick={onOverlay}>
+                {t("overlayBtn")}
+              </button>
+            )}
+            <button ref={cancelRef} type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
+            <button
+              type="button"
+              style={{ ...styles.button, ...styles.primary, ...((p.evidence?.stale === true || materializing) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+              disabled={p.evidence?.stale === true || materializing}
+              onClick={confirmClick}
+            >
+              {t("applyChanges")}
             </button>
-          )}
-          <button ref={cancelRef} type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
-          <button
-            type="button"
-            style={{ ...styles.button, ...styles.primary, ...((p.evidence?.stale === true) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-            disabled={p.evidence?.stale === true}
-            onClick={confirmClick}
-          >
-            {t("applyChanges")}
-          </button>
+          </div>
         </div>
       </div>
     </div>
@@ -729,6 +742,7 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
         <RefreshModal
           t={t}
           flow={flow}
+          materializing={flow.materializing === true}
           onSelect={(selectedIds) => drive({ type: "select", selectedIds })}
           onConfirm={(opts) => drive({ type: "confirm", ...opts })}
           onCancel={() => drive({ type: "cancel" })}

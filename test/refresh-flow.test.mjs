@@ -79,6 +79,43 @@ test("预览→确认：候选就位、勾选经 basePreviewId materialize、确
   assert.equal(applyBody.body.protocolVersion, 2);
 });
 
+test("select 物化期间留在 confirming（materializing），预览原位替换——弹窗不卸载重挂", async () => {
+  const f = makeFetch();
+  f.respond(P, { body: previewBody() });
+  const states = [];
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
+  let release;
+  f.respond(P, { defer: () => new Promise((r) => { release = () => r(jsonResponse({ body: previewBody({ previewId: "pv-2", operationId: "op-2", added: ["b"] }) })); }) });
+  const pending = advance(s, { type: "select", selectedIds: ["b"] }, f, (mid) => states.push(mid));
+  await new Promise((r) => setTimeout(r, 10));
+  const mid = states.at(-1);
+  assert.equal(mid.name, "confirming", "物化期间弹窗必须保持挂载（不得切回 previewing）");
+  assert.equal(mid.materializing, true);
+  assert.equal(mid.preview.previewId, "pv-1", "旧预览原位保留");
+  release();
+  const done = await pending;
+  assert.equal(done.name, "confirming");
+  assert.equal(done.materializing, false);
+  assert.equal(done.preview.previewId, "pv-2");
+});
+
+test("materializing 期间 confirm 被忽略（不得用旧 previewId 应用）", async () => {
+  const f = makeFetch();
+  f.respond(P, { body: previewBody() });
+  const states = [];
+  let s = await advance(initial, { type: "start", operation: "supplement" }, f);
+  let release;
+  f.respond(P, { defer: () => new Promise((r) => { release = () => r(jsonResponse({ body: previewBody({ previewId: "pv-2", operationId: "op-2", added: ["b"] }) })); }) });
+  const pending = advance(s, { type: "select", selectedIds: ["b"] }, f, (mid) => states.push(mid));
+  await new Promise((r) => setTimeout(r, 10));
+  const out = await advance(states.at(-1), { type: "confirm", second: false, empty: false }, f);
+  assert.equal(out.name, "confirming");
+  assert.equal(out.materializing, true);
+  assert.equal(f.calls.filter((u) => u === A).length, 0, "物化中不得发起 apply");
+  release();
+  await pending;
+});
+
 test("零勾选＋目录增量：结果为 pending-restart（目录落地、列表零变化），非 no-change", async () => {
   const f = makeFetch();
   f.respond(P, { body: previewBody({ added: [] }) });

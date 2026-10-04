@@ -95,13 +95,15 @@ export function reduce(state, event) {
     case "confirming": {
       const p = state.preview;
       if (event.type === "select") {
-        // 选择变化：从原快照 materialize（服务端重算，沿用原有效期，不重新取数）
+        // 选择变化：从原快照 materialize（服务端重算，沿用原有效期，不重新取数）。
+        // 留在 confirming＋materializing 标记——弹窗保持挂载、不卸载重挂；
+        // 历史实现切回 previewing 导致弹窗整体关闭再打开（勾选闪烁的根因，2026-10-05）。
         return [{
-          name: "previewing",
+          name: "confirming",
           flags: state.flags ?? initial.flags,
-          operation: p.operation,
-          catalogSource: p.catalogSource,
-          stale: false,
+          preview: p,
+          materializing: true,
+          staleNotice: state.staleNotice,
         }, {
           type: "preview",
           operation: p.operation,
@@ -111,13 +113,22 @@ export function reduce(state, event) {
           confirmEmpty: event.confirmEmpty === true,
         }];
       }
+      if (event.type === "preview-ok") {
+        // materialize/切源完成：预览原位替换（新 previewId 绑定新选择）
+        return [{ name: "confirming", flags: state.flags ?? initial.flags, preview: event.preview, staleNotice: state.stale === true, materializing: false }, null];
+      }
+      if (event.type === "preview-fail") {
+        return [{ name: "failed", flags: state.flags ?? initial.flags, error: event.error }, null];
+      }
       if (event.type === "start") {
-        // 显式切源（overlay/local）或切换操作：生成全新预览（不隐式降级，Q7）
+        // 显式切源（overlay/local）或切换操作：生成全新预览（不隐式降级，Q7）。
+        // 同 select：留在 confirming 保持弹窗挂载。
         return [{
-          name: "previewing",
-          operation: event.operation === "rebuild" ? "rebuild" : p.operation,
-          catalogSource: event.catalogSource,
-          stale: false,
+          name: "confirming",
+          flags: state.flags ?? initial.flags,
+          preview: p,
+          materializing: true,
+          staleNotice: state.staleNotice,
         }, {
           type: "preview",
           operation: event.operation === "rebuild" ? "rebuild" : p.operation,
@@ -125,6 +136,7 @@ export function reduce(state, event) {
         }];
       }
       if (event.type === "confirm") {
+        if (state.materializing) return [state, null]; // 物化中不得用旧 previewId 应用
         const isRebuild = p.operation === "rebuild";
         const emptyTarget = isRebuild && (p.diff?.targetView?.models ?? []).length === 0;
         if (isRebuild && event.second !== true) return [state, null]; // 重建需二次确认
