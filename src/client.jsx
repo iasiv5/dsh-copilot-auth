@@ -53,8 +53,9 @@ const DICTS = {
     rebuildTitle: "Rebuild model list",
     candidates: "Models available to add",
     selectAll: "Select all",
+    selectNone: "Deselect all",
     supplementRisk: "Existing models and customizations will be kept. Only selected models will be added.",
-    rebuildRisk: "This rebuilds Copilot model configuration from the verified account list and clears the model customizations below. Other provider settings remain unchanged.",
+    rebuildRisk: "Rebuilding clears model parameters and overrides. Other provider settings remain unchanged.",
     clearRisk: "This clears the Copilot model list and its model customizations. Confirm clearing separately.",
     secondConfirm: "This is destructive. Click again to confirm.",
     applyChanges: "Apply changes",
@@ -136,8 +137,9 @@ const DICTS = {
     rebuildTitle: "重建模型列表",
     candidates: "可新增的模型",
     selectAll: "全选",
+    selectNone: "取消全选",
     supplementRisk: "将保留现有模型及定制，只添加你勾选的模型。",
-    rebuildRisk: "将按本次可信账号列表重建 Copilot 模型配置，并清除下列模型参数与覆盖配置。其他提供方设置不变。",
+    rebuildRisk: "重建将清除现有模型参数与覆盖配置，其他提供方设置不变。",
     clearRisk: "本次将清空 Copilot 模型列表并清除其模型定制。请单独确认清空。",
     secondConfirm: "此操作具有破坏性，请再次点击确认。",
     applyChanges: "应用更改",
@@ -355,11 +357,15 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
           <>
             <p style={styles.modalText}>
               <strong>{t("candidates")}</strong>（{candidates.length}）
-              {candidates.length > 0 && (
-                <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, marginLeft: 10, fontSize: 12 }} onClick={() => onSelect(candidates)}>
-                  {t("selectAll")}
-                </button>
-              )}
+              {candidates.length > 0 && (() => {
+                // 全选/取消全选互斥切换：全选中→取消全选；有任一未勾选（含部分勾选）→全选
+                const allSelected = candidates.every((id) => selectedIds.has(id));
+                return (
+                  <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, marginLeft: 10, fontSize: 12 }} onClick={() => onSelect(allSelected ? [] : candidates)}>
+                    {allSelected ? t("selectNone") : t("selectAll")}
+                  </button>
+                );
+              })()}
             </p>
             {list(candidates, styles.added, (id) => (
               <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -704,13 +710,12 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
                   </button>
                 </div>
               )}
-              {(flow.result?.error || flow.result?.changes) && (
+              {/* 技术详情只在真实失败时展示（v1.2.12）：成功路径的 changes 计数
+                  与弹窗中的增删列表重复，属噪音——全局移除 */}
+              {flow.result?.error && (
                 <details style={styles.modalText}>
                   <summary>{t("techDetails")}</summary>
-                  <span style={{ ...styles.mono, fontSize: 12 }}>
-                    {flow.result?.error ?? ""}
-                    {flow.result?.changes ? ` ${JSON.stringify(flow.result.changes)}` : ""}
-                  </span>
+                  <span style={{ ...styles.mono, fontSize: 12 }}>{flow.result.error}</span>
                 </details>
               )}
             </div>
