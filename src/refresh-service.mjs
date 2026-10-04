@@ -267,5 +267,10 @@ export function createRefreshService(ctx, {
     snapshots.clear();
   }
 
-  return { preview, apply, status, retire, bootReady, dispose };
+  // 诊断/测试观察面：当前内存快照数（含未过期；过期项在下次 preview 入口清扫）
+  function snapshotCount() {
+    return snapshots.size;
+  }
+
+  return { preview, apply, status, retire, bootReady, dispose, snapshotCount };
 }

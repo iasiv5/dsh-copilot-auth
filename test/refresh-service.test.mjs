@@ -230,3 +230,13 @@ test("状态未知版本：apply 拒绝并要求人工核实", async () => {
   const p = await h.service.preview({ operation: "supplement", selectedIds: ["new-1"] });
   assert.equal(await errCode(h.service.apply({ previewId: p.previewId, operationId: p.operationId })), "STATE_UNKNOWN");
 });
+
+test("快照过期淘汰：TTL 过后的快照在下次 preview 入口被清扫（防长驻累积）", async () => {
+  const h = makeHarness();
+  await h.service.preview({ operation: "supplement", selectedIds: [] });
+  await h.service.preview({ operation: "supplement", selectedIds: [] });
+  assert.equal(h.service.snapshotCount(), 2);
+  h.t.now += 10 * 60 * 1000 + 1; // 全部过期
+  await h.service.preview({ operation: "supplement", selectedIds: [] }); // 入口清扫 + 新建 1 个
+  assert.equal(h.service.snapshotCount(), 1, "过期快照被清扫，不随预览次数累积");
+});

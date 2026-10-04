@@ -464,24 +464,58 @@ export function createTransaction(ctx, {
           function terminalize(status, phase, error) {
             const st = stateIO.load();
             st.activeOperation = null;
-            st.lastResult = { operationId: a.operationId, status, phase, error: error ?? null, changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, ...modelChangeCounts(a) } };
+            st.lastResult = { operationId: a.operationId, status, phase, error: error ?? null, changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, ...(status === "applied" ? modelChangeCounts(a) : { modelsAdded: 0, modelsRemoved: 0 }) } };
             if (status === "applied") st.restartState = null;
             st.intentVersion = readIntentVersion();
             stateIO.save(st);
             return { ok: true, active: false, status };
           }
         }
-        // registry／目录-only 的 catalog-landed 残留（崩溃于验证前）：重新验证
-        const targetIds = (a.targetView.models ?? []).map((m) => m?.id).filter(Boolean);
-        const served = await waitForServed(targetIds);
-        const st = stateIO.load();
-        st.activeOperation = null;
-        st.lastResult = served.ok
-          ? { operationId: a.operationId, status: "applied", phase: "verified", changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, ...modelChangeCounts(a) } }
-          : { operationId: a.operationId, status: "partial", phase: "catalog-landed", error: `registry-not-served: ${served.missing.join(",")}`, changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, ...modelChangeCounts(a) } };
-        st.intentVersion = readIntentVersion();
-        stateIO.save(st);
-        return { ok: true, active: false, status: st.lastResult.status };
+        // registry／目录-only 的 catalog-landed 残留：崩溃窗口两义（提交前/提交后/验证前），
+        // 先按当前配置归属收敛，再做 served 验证（R2-02）。
+        // changes 语义统一为「已发生的变更」（R2-01）：applied/partial（配置确已落地）按
+        // baseline↔target 计数；conflict（配置未写/保留用户值）与目录-only 计 0。
+        const residueConfigWrite = a.writeSet?.models || a.writeSet?.modelOverrides;
+        const residueTargetIds = (a.targetView.models ?? []).map((m) => m?.id).filter(Boolean);
+        const finishResidue = (status, error) => {
+          const st = stateIO.load();
+          st.activeOperation = null;
+          st.lastResult = {
+            operationId: a.operationId,
+            status,
+            phase: status === "applied" ? "verified" : "catalog-landed",
+            error: error ?? null,
+            changes: {
+              catalogAdded: overlayIds(a.pendingOverlay ?? {}).length,
+              ...(residueConfigWrite && (status === "applied" || status === "partial") ? modelChangeCounts(a) : { modelsAdded: 0, modelsRemoved: 0 }),
+            },
+          };
+          st.intentVersion = readIntentVersion();
+          stateIO.save(st);
+          return { ok: true, active: false, status };
+        };
+        if (residueConfigWrite) {
+          const now = await deps.describeConfigView();
+          const atTarget = canonical(now.view.models) === canonical(a.targetView.models)
+            && canonical(now.view.modelOverrides) === canonical(a.targetView.modelOverrides);
+          const atBaseline = canonical(now.view.models) === canonical(a.settingsBaseline.view.models)
+            && canonical(now.view.modelOverrides) === canonical(a.settingsBaseline.view.modelOverrides);
+          if (!atTarget && !atBaseline) {
+            return finishResidue("conflict", "settings-conflict: configuration changed since preview; user value preserved");
+          }
+          if (atBaseline) {
+            // 崩溃于提交前：写前意图已持久，按当前 revision 重提交
+            try {
+              await deps.mutateSettings(buildConfigOps(a.settingsBaseline.view, a.targetView), now.revision);
+            } catch {
+              return finishResidue("conflict", "settings-conflict at boot recommit");
+            }
+          }
+        }
+        const served = await waitForServed(residueTargetIds);
+        return served.ok
+          ? finishResidue("applied")
+          : finishResidue("partial", `registry-not-served: ${served.missing.join(",")}`);
       }
 
       if (a.phase === "configuration-committed") {
@@ -499,10 +533,10 @@ export function createTransaction(ctx, {
             await deps.mutateSettings(ops, now.revision);
             return terminal(stateIO.load(), { operationId: a.operationId, status: "applied", phase: "verified", changes: { catalogAdded: 0, ...modelChangeCounts(a) } });
           } catch {
-            return terminal(stateIO.load(), { operationId: a.operationId, status: "conflict", phase: "configuration-committed", error: "settings-conflict at boot recommit", changes: { catalogAdded: 0, ...modelChangeCounts(a) } });
+            return terminal(stateIO.load(), { operationId: a.operationId, status: "conflict", phase: "configuration-committed", error: "settings-conflict at boot recommit", changes: { catalogAdded: 0, modelsAdded: 0, modelsRemoved: 0 } });
           }
         }
-        return terminal(stateIO.load(), { operationId: a.operationId, status: "rollback-conflict", phase: "configuration-committed", error: "commit-gap: configuration neither baseline nor target; user value preserved", changes: { catalogAdded: 0, ...modelChangeCounts(a) } });
+        return terminal(stateIO.load(), { operationId: a.operationId, status: "rollback-conflict", phase: "configuration-committed", error: "commit-gap: configuration neither baseline nor target; user value preserved", changes: { catalogAdded: 0, modelsAdded: 0, modelsRemoved: 0 } });
       }
 
       return { ok: true, active: true, status: a.phaseResult?.status ?? a.phase };

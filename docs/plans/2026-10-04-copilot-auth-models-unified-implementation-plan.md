@@ -2,9 +2,11 @@
 
 状态：2026-10-04 由[计划A：授权与状态](<2026-10-03-copilot-authorization-state-implementation-plan.md>)与[计划B：模型事务](<2026-10-03-copilot-model-transactions-implementation-plan.md>)合并简化而成，**取代二者作为唯一实施依据**。设计事实以[设计规格](<../design/2026-10-03-dual-profile-auth-and-models.md>)与[ADR 0004](<../adr/0004-safe-model-management-and-profile-isolation.md>)为准，本计划只保留其中用户可感知的正确性修复与功能拆分，防御性协议机器按「非目标」节明确裁掉。2026-10-04 第 1 轮独立评审提出 12 项问题（1 阻断／3 重要／8 建议），已全部修订并经第 2 轮复核确认；第 2 轮另提 6 项（1 重要／5 建议）、第 3 轮再提 2 项（1 重要／1 建议）均已修订入本版。
 
-**执行记录（2026-10-04）**：T0–T12 已全部在 main 分支实施完成（checkpoint：`ffc26ed` 阶段一 T0–T5、`d778dd1` 阶段二/三 T6–T12）；全量 183 条测试绿、`npm run build` 产物同步、`npm pack --dry-run` 22 文件含全部 7 个新模块且无测试/秘密文件。未发布（G09）；实机人工验收清单待用户另行授权后执行。
+**执行记录（2026-10-04）**：T0–T12 已全部在 main 分支实施完成（checkpoint：`ffc26ed` 阶段一 T0–T5、`d778dd1` 阶段二/三 T6–T12）；`npm run build` 产物同步、`npm pack --dry-run` 22 文件含全部 7 个新模块且无测试/秘密文件。未发布（G09）；实机人工验收清单待用户另行授权后执行。全量测试经两轮执行评审后为 **187 条全绿**（初版 183 → 第 1 轮评审 +2 → 第 2 轮评审 +2）。
 
-**执行后评审修订（2026-10-04，第 1 轮执行评审）**：已修复 withdrawalDelivery 写入 attempt（快照如实反映）、补通道门控状态机测试、boot 终态按 baseline↔target 计数、T4 跳过原因入日志、词典去重/清死键、快照过期淘汰、405 方法守卫用例；并记录如下**有意偏离**：① T8「Modify src/copilot-models.mjs」未改该文件——fetchedAt/缓存逻辑落在 refresh-service.mjs 内（`fetchLiveAvailableModelIds` 原样复用），语义全部达成；② checkpoint 边界 T6–T12 合并为单提交（T11/T12 未单独切分）；③ blockedReason 实际仅产生 `inject-unavailable`/`install-unresolved`，实例分歧与只读安装经诊断字段表达（见契约表修订）。
+**执行后评审修订（2026-10-04，第 1 轮执行评审，13 项：2 重要／11 建议）**：已修复 withdrawalDelivery 写入 attempt（快照如实反映）、补通道门控状态机测试、boot 终态按 baseline↔target 计数、T4 跳过原因入日志、词典去重/清死键、快照过期淘汰、405 方法守卫用例；并记录如下**有意偏离**：① T8「Modify src/copilot-models.mjs」未改该文件——fetchedAt/缓存逻辑落在 refresh-service.mjs 内（`fetchLiveAvailableModelIds` 原样复用），语义全部达成；② checkpoint 边界 T6–T12 合并为单提交（T11/T12 未单独切分）；③ blockedReason 实际仅产生 `inject-unavailable`/`install-unresolved`，实例分歧与只读安装经诊断字段表达（见契约表修订）。
+
+**执行后评审修订（2026-10-04，第 2 轮执行评审，3 项建议）**：① changes 语义统一为「已发生的变更」——boot 终态仅 applied/partial（配置确已落地）填 models 计数，conflict/rollback-conflict 归零；② registry catalog-landed 崩溃窗口两义消除——boot 残留先按「当前配置==target→幂等核实／==baseline→按写前意图重提交／其余→conflict 保留用户值」收敛，再做 served 验证；③ service 暴露 snapshotCount() 诊断面，补快照淘汰与残留三分支测试。
 
 ## 目标
 

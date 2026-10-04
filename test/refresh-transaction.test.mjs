@@ -123,6 +123,7 @@ test("TX_FILE boot：目录已加载＋基线未变 → 按 CAS 提交 → appli
   await w.makeTx().runApply({ snapshot: makeSnapshot(w) });
   const r1 = await w.makeTx().bootRecover();
   assert.equal(r1.status, "applied");
+  assert.equal(w.stateIO.load().lastResult.changes.modelsAdded, 1, "boot 终态计数按 baseline↔target 差异（R2-01/R2-03）");
   assert.equal(w.settings.mutateCalls.length, 1, "boot 恰好提交一次");
   assert.deepEqual(w.settings.userLayer.providers["github-copilot"].models, [{ id: "keep-1" }, { id: "new-1" }]);
   const st = w.stateIO.load();
@@ -141,6 +142,7 @@ test("TX_FILE boot：提交前用户已改配置 → conflict 保留用户值不
   w.settings.revision += 1;
   const r = await w.makeTx().bootRecover();
   assert.equal(r.status, "conflict");
+  assert.equal(w.stateIO.load().lastResult.changes.modelsAdded, 0, "conflict 未写配置，计数为 0（R2-01）");
   assert.equal(w.settings.mutateCalls.length, 0, "boot 零提交");
   assert.deepEqual(w.settings.userLayer.providers["github-copilot"].models, [{ id: "user-9" }], "用户值保留");
   assert.equal(w.stateIO.load().lastResult.status, "conflict");
@@ -318,4 +320,41 @@ test("TX_SELF_HEAL：跨 pi-ai 基线且条目缺失 → 不自动应用，上�
   await w.makeTx().bootRecover();
   assert.equal(readFileSync(w.catalogFile, "utf8"), before, "跨基线不改安装树");
   assert.ok(w.stateIO.load().lastError?.includes("self-heal-incompatible"));
+});
+
+test("TX_RESIDUE：registry catalog-landed 崩溃窗口两义——提交前/提交后/用户已改三分支收敛（R2-02）", async () => {
+  const seed = (w, models) => {
+    const s = w.stateIO.load();
+    s.activeOperation = {
+      operationId: "op-r", strategy: "supplement", selectedIds: ["new-1"], intentVersion: w.intent.version,
+      settingsBaseline: { view: { modelsPresent: true, models: [{ id: "keep-1" }], modelOverridesPresent: false, modelOverrides: null }, revision: 7 },
+      targetView: { modelsPresent: true, models: [{ id: "keep-1" }, { id: "new-1" }], modelOverridesPresent: false, modelOverrides: null },
+      writeSet: { catalogEntries: true, models: true, modelOverrides: false }, pendingOverlay: OVERLAY,
+      phase: "catalog-landed", phaseResult: null, lastError: null,
+    };
+    w.stateIO.save(s);
+    if (models !== undefined) w.settings.userLayer.providers["github-copilot"].models = models;
+  };
+  // ① 崩溃于提交前（配置仍=baseline）→ boot 重提交 → applied，计数真实
+  const w1 = makeWorld({ writable: false, served: ["keep-1", "new-1"] });
+  seed(w1);
+  const r1 = await w1.makeTx().bootRecover();
+  assert.equal(r1.status, "applied");
+  assert.equal(w1.settings.mutateCalls.length, 1, "提交前崩溃 → boot 重提交一次");
+  assert.equal(w1.stateIO.load().lastResult.changes.modelsAdded, 1);
+  // ② 崩溃于提交后（配置已=target）→ 幂等核实 → applied，不重复提交
+  const w2 = makeWorld({ writable: false, served: ["keep-1", "new-1"], userLayer: { providers: { "github-copilot": { models: [{ id: "keep-1" }, { id: "new-1" }] } } } });
+  w2.settings.revision = 8; // 提交已发生，revision 前进
+  seed(w2, [{ id: "keep-1" }, { id: "new-1" }]);
+  const r2 = await w2.makeTx().bootRecover();
+  assert.equal(r2.status, "applied");
+  assert.equal(w2.settings.mutateCalls.length, 0, "提交后崩溃 → 只核实不重发");
+  // ③ 用户并发修改（既非 baseline 也非 target）→ conflict 保留用户值，零提交
+  const w3 = makeWorld({ writable: false, served: ["keep-1", "new-1"] });
+  seed(w3, [{ id: "user-9" }]);
+  const r3 = await w3.makeTx().bootRecover();
+  assert.equal(r3.status, "conflict");
+  assert.equal(w3.settings.mutateCalls.length, 0);
+  assert.deepEqual(w3.settings.userLayer.providers["github-copilot"].models, [{ id: "user-9" }]);
+  assert.equal(w3.stateIO.load().lastResult.changes.modelsAdded, 0);
 });
