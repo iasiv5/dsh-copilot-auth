@@ -233,3 +233,24 @@ test("AUTH_already_configured：已有凭据时 start 拒绝且不调 begin；de
   assert.equal(typeof attemptId, "string");
   assert.equal(h2.calls.begin, 1);
 });
+
+test("AUTH_cause_code：网络层失败附 cause.code，桌面/代理类环境问题一眼可辨", async () => {
+  const h = makeHarness({ begin: async () => { throw Object.assign(new Error("fetch failed"), { cause: { code: "ETIMEDOUT" } }); } });
+  await h.controller.start();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h.controller.snapshot().error, "fetch failed (ETIMEDOUT)");
+  // 证书类失败码同样保留（企业 TLS 检查场景）
+  const h2 = makeHarness({ begin: async () => { throw Object.assign(new Error("fetch failed"), { cause: { code: "UNABLE_TO_VERIFY_LEAF_SIGNATURE" } }); } });
+  await h2.controller.start();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h2.controller.snapshot().error, "fetch failed (UNABLE_TO_VERIFY_LEAF_SIGNATURE)");
+  // cause 无 code / 非白名单形状：维持原脱敏行为，不泄漏
+  const h3 = makeHarness({ begin: async () => { throw Object.assign(new Error("fetch failed"), { cause: { code: "secret token ghp_x" } }); } });
+  await h3.controller.start();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h3.controller.snapshot().error, "fetch failed");
+  const h4 = makeHarness({ begin: async () => { throw Object.assign(new Error("fetch failed"), { cause: { message: "connect ETIMEDOUT 1.2.3.4:443" } }); } });
+  await h4.controller.start();
+  await new Promise((r) => setTimeout(r, 5));
+  assert.equal(h4.controller.snapshot().error, "fetch failed");
+});

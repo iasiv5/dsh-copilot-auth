@@ -39,6 +39,10 @@ const DICTS = {
     copy: "Copy",
     copied: "Copied ✓",
     unknown: "Unknown error",
+    netConnect: "Cannot reach GitHub. Check this machine's network or proxy settings.",
+    netDns: "Cannot resolve github.com. Check DNS or network settings.",
+    netCert: "GitHub certificate verification failed. A corporate proxy or TLS inspection may be intercepting the connection.",
+    netGeneric: "The authorization request failed over the network.",
     statusUnknown: "Status unknown",
     errNetwork: "Network error: cannot reach the authorization service. Retrying automatically.",
     errGateway: "Gateway error: the DSH service may be restarting. Retrying automatically.",
@@ -123,6 +127,10 @@ const DICTS = {
     copy: "复制",
     copied: "已复制 ✓",
     unknown: "未知错误",
+    netConnect: "无法连接 GitHub：请检查本机网络或代理设置。",
+    netDns: "无法解析 GitHub 域名：请检查 DNS 或网络设置。",
+    netCert: "GitHub 证书校验失败：可能存在企业代理或 TLS 检查拦截。",
+    netGeneric: "授权请求网络失败。",
     statusUnknown: "状态未知",
     errNetwork: "网络异常：无法连接授权服务，正在自动重试。",
     errGateway: "网关错误：DSH 服务可能正在重启，正在自动重试。",
@@ -626,7 +634,22 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
       {phase === "unavailable" && (
         <p style={styles.banner}>⚠ {t("unavailable")}</p>
       )}
-      {phase === "failed" && attempt?.error && <p style={styles.error}>{attempt.error}</p>}
+      {phase === "failed" && attempt?.error && (() => {
+        // 网络层失败（undici 原话 "fetch failed (CODE)"，v1.2.18 起服务端附码）
+        // → 人性化提示 + 弱化的原始失败码；其余错误维持原样展示
+        const m = /^fetch failed \(([A-Za-z0-9_]+)\)$/.exec(attempt.error);
+        if (!m) return <p style={styles.error}>{attempt.error}</p>;
+        const code = m[1];
+        const human = code === "ENOTFOUND" ? t("netDns")
+          : code.startsWith("CERT") || code.includes("SIGNATURE") ? t("netCert")
+          : t("netConnect");
+        return (
+          <>
+            <p style={styles.error}>{human}</p>
+            <p style={{ ...styles.modalText, opacity: 0.6 }}>{attempt.error}</p>
+          </>
+        );
+      })()}
       {phase === "failed" && !attempt?.error && (
         <>
           <p style={styles.banner}>⚠ {httpErrorText(t, auth.error) ?? t("unknown")}</p>

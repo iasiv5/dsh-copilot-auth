@@ -17,10 +17,18 @@ export const LIVE_STATUSES = ["starting", "waiting", "finishing"];
 // 授权错误脱敏：仅保留安全字符集（字母/数字/空格/点/冒号/逗号/连字符），
 // 阻断上游异常文本或疑似 token（含 = ; / + _ 等的串）进入状态面。
 const SAFE_AUTH_ERROR = /^[A-Za-z0-9 .,:-]{1,140}$/;
+// 网络层失败码（undici cause.code）：严格大写/数字/下划线白名单，
+// 如 ETIMEDOUT/ECONNRESET/ENOTFOUND/UNABLE_TO_VERIFY_LEAF_SIGNATURE
+const SAFE_CAUSE_CODE = /^[A-Z0-9_]{3,60}$/;
 
 export function sanitizeAuthError(err) {
   const msg = String(err?.message ?? err);
-  return SAFE_AUTH_ERROR.test(msg) ? msg : "authorization-failed";
+  const base = SAFE_AUTH_ERROR.test(msg) ? msg : "authorization-failed";
+  // v1.2.18：网络层失败的原话（如 Node 的 "fetch failed"）不携带任何定位信息，
+  // 追加 cause.code（严格白名单）让桌面/代理类环境问题一眼可辨（主人 2026-10-05 裁决）
+  const causeCode = String(err?.cause?.code ?? "");
+  if (SAFE_CAUSE_CODE.test(causeCode)) return `${base} (${causeCode})`;
+  return base;
 }
 
 function authError(code, message, extra = {}) {
