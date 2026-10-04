@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, renameSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { tgz } from "./helpers.mjs";
 import plugin from "../src/host.mjs";
@@ -527,13 +527,12 @@ test("REFRESH_V2_state-corrupt：损坏 v2 状态经 /status.refresh.lastError �
   const ctx = makeRefreshCtx();
   await ctx.bootReady; // 先让 boot 序列落定，再注入损坏（避免竞态）
   const stateFile = join(ctx.profileContext.dir, "copilot-auth", "refresh-state.json");
-  mkdirSync(dirname2(stateFile), { recursive: true });
+  mkdirSync(dirname(stateFile), { recursive: true });
   writeFileSync(stateFile, "{ broken");
   const status = await call(handler(ctx, "/status"));
   assert.equal(status.body.refresh.lastError, "state-corrupt");
-  assert.ok(readdirSync(dirname2(stateFile)).some((f) => f.includes(".corrupt-")), "原件改名留存");
+  assert.ok(readdirSync(dirname(stateFile)).some((f) => f.includes(".corrupt-")), "原件改名留存");
 });
-function dirname2(p) { return p.slice(0, p.lastIndexOf("/")); }
 
 test("REFRESH_V2_legacy：旧 v1 全局状态文件 → legacyStateDetected（只读，不消费）", async () => {
   const inst = makeInstall();
