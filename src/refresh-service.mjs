@@ -43,9 +43,10 @@ async function resolveAccountEvidence(ctx, { scope, readIntentVersion, clock, fe
   if (payload.access) {
     try {
       const ids = await fetchLiveAvailableModelIds({ credential: payload, fetchImpl });
+      const fetchedAt = iso(clock.now()); // 单次取时：缓存值与返回值同源（避免毫秒漂移）
       mkdirSync(scope.dataDir, { recursive: true });
-      writeJsonAtomic(cacheFile, { ids, fetchedAt: iso(clock.now()), intentVersion: iv });
-      return { source: "live", ids, fetchedAt: iso(clock.now()), stale: false };
+      writeJsonAtomic(cacheFile, { ids, fetchedAt, intentVersion: iv });
+      return { source: "live", ids, fetchedAt, stale: false };
     } catch { /* 回退缓存判定 */ }
   }
   const cache = readCache();
@@ -100,6 +101,11 @@ export function createRefreshService(ctx, {
   async function preview(body = {}) {
     requireScope();
     requireDeps();
+    // 过期快照淘汰（长驻进程防累积；幂等查询走持久状态，不受影响）
+    const nowTs = clock.now();
+    for (const [id, snap] of snapshots) {
+      if (nowTs > snap.expiresAt) snapshots.delete(id);
+    }
     const { operation, catalogSource, basePreviewId, selectedIds, confirmEmpty } = body;
     if (operation !== "supplement" && operation !== "rebuild") {
       throw flowError("INVALID_OPERATION", "invalid-operation");

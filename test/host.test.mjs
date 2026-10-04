@@ -551,3 +551,10 @@ test("REFRESH_V2_legacy：旧 v1 全局状态文件 → legacyStateDetected（�
   assert.equal(status.body.refresh.legacyStateDetected, true);
   assert.equal(status.body.refresh.activated, false, "不自动继承 v1 激活");
 });
+
+test("方法守卫：GET 打 POST 路由 / POST 打 GET 路由 → 405 method not allowed", async () => {
+  const ctx = makeCtx();
+  assert.equal((await call(handler(ctx, "/start"), { method: "GET" })).code, 405);
+  assert.equal((await call(handler(ctx, "/status"), { method: "POST" })).code, 405);
+  assert.equal((await call(handler(ctx, "/refresh/apply"), { method: "GET" })).code, 405);
+});

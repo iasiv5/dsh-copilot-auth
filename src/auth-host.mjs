@@ -130,6 +130,8 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
         withdrawalDelivery = "failed";
       }
     }
+    // delivery 写入 attempt：刷新页面后 /state 恢复仍如实展示「已请求撤回」事实
+    if (attempt) attempt.withdrawalDelivery = withdrawalDelivery;
     // 任何响应都不承诺晚写停止：风险锁存待核实
     setRiskLatch("withdrawal-requested");
     return { withdrawalDelivery };

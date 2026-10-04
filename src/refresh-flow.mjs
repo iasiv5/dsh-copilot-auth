@@ -30,6 +30,13 @@ const fromRefresh = (state, refresh) => ({
 
 const restartStates = new Set(["pending-restart"]);
 
+// 通道门控（T10 status refresh 块 → T11 入口禁用）：catalogMode ∈ file/registry/blocked/unknown。
+// file/registry 可操作；blocked/unknown 或 scope 不可用 → 不承诺可应用，入口禁用（G02／设计§4.3）。
+export function refreshBlocked(flags) {
+  const mode = flags?.catalogMode;
+  return flags?.scopeAvailable === false || mode === "blocked" || mode === "unknown";
+}
+
 export function reduce(state, event) {
   switch (state.name) {
     case "idle":

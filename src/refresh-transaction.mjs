@@ -41,6 +41,18 @@ function buildConfigOps(baseline, target) {
   return ops;
 }
 
+// boot 终态的 models 计数：按 settingsBaseline ↔ targetView 的 id 差异计算
+//（apply 当期的 pending-restart 结果 modelsAdded=0 是事实——配置尚未写；boot 提交后按此更正）。
+function modelChangeCounts(active) {
+  const baseIds = new Set(((active.settingsBaseline?.view?.models ?? [])
+    .map((m) => m?.id).filter(Boolean)));
+  const targetIds = (active.targetView?.models ?? []).map((m) => m?.id).filter(Boolean);
+  return {
+    modelsAdded: targetIds.filter((id) => !baseIds.has(id)).length,
+    modelsRemoved: [...baseIds].filter((id) => !targetIds.includes(id)).length,
+  };
+}
+
 export function createTransaction(ctx, {
   scope,
   stateIO,
@@ -452,7 +464,7 @@ export function createTransaction(ctx, {
           function terminalize(status, phase, error) {
             const st = stateIO.load();
             st.activeOperation = null;
-            st.lastResult = { operationId: a.operationId, status, phase, error: error ?? null, changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, modelsAdded: 0, modelsRemoved: 0 } };
+            st.lastResult = { operationId: a.operationId, status, phase, error: error ?? null, changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, ...modelChangeCounts(a) } };
             if (status === "applied") st.restartState = null;
             st.intentVersion = readIntentVersion();
             stateIO.save(st);
@@ -465,8 +477,8 @@ export function createTransaction(ctx, {
         const st = stateIO.load();
         st.activeOperation = null;
         st.lastResult = served.ok
-          ? { operationId: a.operationId, status: "applied", phase: "verified", changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, modelsAdded: 0, modelsRemoved: 0 } }
-          : { operationId: a.operationId, status: "partial", phase: "catalog-landed", error: `registry-not-served: ${served.missing.join(",")}`, changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, modelsAdded: 0, modelsRemoved: 0 } };
+          ? { operationId: a.operationId, status: "applied", phase: "verified", changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, ...modelChangeCounts(a) } }
+          : { operationId: a.operationId, status: "partial", phase: "catalog-landed", error: `registry-not-served: ${served.missing.join(",")}`, changes: { catalogAdded: overlayIds(a.pendingOverlay ?? {}).length, ...modelChangeCounts(a) } };
         st.intentVersion = readIntentVersion();
         stateIO.save(st);
         return { ok: true, active: false, status: st.lastResult.status };
@@ -478,19 +490,19 @@ export function createTransaction(ctx, {
         const now = await deps.describeConfigView();
         if (canonical(now.view.models) === canonical(a.targetView.models)
           && canonical(now.view.modelOverrides) === canonical(a.targetView.modelOverrides)) {
-          return terminal(stateIO.load(), { operationId: a.operationId, status: "applied", phase: "verified", changes: { catalogAdded: 0, modelsAdded: 0, modelsRemoved: 0 } });
+          return terminal(stateIO.load(), { operationId: a.operationId, status: "applied", phase: "verified", changes: { catalogAdded: 0, ...modelChangeCounts(a) } });
         }
         if (canonical(now.view.models) === canonical(a.settingsBaseline.view.models)
           && canonical(now.view.modelOverrides) === canonical(a.settingsBaseline.view.modelOverrides)) {
           const ops = buildConfigOps(a.settingsBaseline.view, a.targetView);
           try {
             await deps.mutateSettings(ops, now.revision);
-            return terminal(stateIO.load(), { operationId: a.operationId, status: "applied", phase: "verified", changes: { catalogAdded: 0, modelsAdded: 0, modelsRemoved: 0 } });
+            return terminal(stateIO.load(), { operationId: a.operationId, status: "applied", phase: "verified", changes: { catalogAdded: 0, ...modelChangeCounts(a) } });
           } catch {
-            return terminal(stateIO.load(), { operationId: a.operationId, status: "conflict", phase: "configuration-committed", error: "settings-conflict at boot recommit", changes: { catalogAdded: 0, modelsAdded: 0, modelsRemoved: 0 } });
+            return terminal(stateIO.load(), { operationId: a.operationId, status: "conflict", phase: "configuration-committed", error: "settings-conflict at boot recommit", changes: { catalogAdded: 0, ...modelChangeCounts(a) } });
           }
         }
-        return terminal(stateIO.load(), { operationId: a.operationId, status: "rollback-conflict", phase: "configuration-committed", error: "commit-gap: configuration neither baseline nor target; user value preserved", changes: { catalogAdded: 0, modelsAdded: 0, modelsRemoved: 0 } });
+        return terminal(stateIO.load(), { operationId: a.operationId, status: "rollback-conflict", phase: "configuration-committed", error: "commit-gap: configuration neither baseline nor target; user value preserved", changes: { catalogAdded: 0, ...modelChangeCounts(a) } });
       }
 
       return { ok: true, active: true, status: a.phaseResult?.status ?? a.phase };

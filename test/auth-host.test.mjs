@@ -71,11 +71,13 @@ test("AUTH_cancel：先 bump 再调用宿主撤销；delivery 三态映射并设
   for (const c of cases) {
     const h = makeHarness({ begin: () => new Promise(() => {}), cancelFn: c.cancelFn });
     h.controller.start();
+    await new Promise((r) => setTimeout(r, 5)); // 让 begin 微任务跑完，attempt 就位
     const v0 = h.intentIO.version;
     const r = await h.controller.cancel();
     assert.equal(r.withdrawalDelivery, c.expect, c.name);
     assert.equal(h.intentIO.version, v0 + 1, `${c.name}：cancel 先持久 intentVersion+1`);
     assert.ok(h.controller.snapshot().riskLatch, `${c.name}：riskLatch 已置`);
+    assert.equal(h.controller.snapshot().withdrawalDelivery, c.expect, `${c.name}：snapshot 如实反映 delivery（刷新后仍可见）`);
     assert.equal(h.controller.snapshot().status, "withdrawal-pending-unverified", c.name);
   }
 });

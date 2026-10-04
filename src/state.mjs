@@ -1,5 +1,8 @@
 // state.mjs — 持久状态的唯一读写层（薄层，落盘逻辑都在 atomic-json）。
-// 状态文件：~/.dsh/copilot-auth-state.json（路径由 host 决定），原子写。
+// 【生产路径自 v2 起只走下方 schema 2 函数（loadRefreshState/saveRefreshState）；
+//  上方 v1 函数（loadState/saveState/journal 系列）仅为历史回归测试保留，
+//  host.mjs 已不再引用（v1 全局状态文件自 T10 起只读检测）。】
+// v1 状态文件：~/.dsh/copilot-auth-state.json（路径由 host 决定），原子写。
 // lastError 规则（R3-6）：顶层 lastError/lastErrorAt 是唯一诊断面；journal 相位内
 // 错误同时投影顶层；任一相位成功推进/消费时清除；state 损坏改名留存 .corrupt-<ts>
 // 不覆盖，返回带 state-corrupt 的安全态，且后续普通保存不得抹掉留存文件。

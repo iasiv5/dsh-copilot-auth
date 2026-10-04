@@ -1,12 +1,12 @@
 // client 半区：浏览器侧 cordis 插件。通过 settings.section 插槽注册
 // 「GHC设置」页（order 11，紧挨 Models 的 order 10），fetch host 半区的
-// 4 条自有路由，轮询渲染设备码（user code + 验证链接）。
+// 8 条自有路由（授权 5 条＋模型 preview/apply/retire），轮询渲染设备码。
 // 文案走 locale 服务（en/zh 词典，随系统语言切换）；
 // 侧栏图标：壳的 navIcon(id) 对未知 id 回落齿轮且不开放注册，故用
 // MutationObserver 把本节导航行的齿轮替换为单色 Copilot 图标
 // （octicons copilot-16，fill=currentColor，浅/深主题自动一致）。
 import { useEffect, useRef, useState } from "react";
-import { initial as refreshInitial, advance } from "./refresh-flow.mjs";
+import { initial as refreshInitial, advance, refreshBlocked } from "./refresh-flow.mjs";
 import { createAuthFlow } from "./auth-flow.mjs";
 
 export const name = "copilot-auth-ui";
@@ -84,13 +84,10 @@ const DICTS = {
     retireTitle: "End previous configuration intent",
     retireConfirmText: "End the intent only; existing changes are not rolled back or undone.",
     legacy: "Legacy shared recovery state was found. It will not be applied automatically; preview and confirm in this profile.",
-    unavailable: "This runtime lacks the capabilities needed to apply changes safely.",
     techDetails: "Technical details",
     stateCorrupt: "State file was corrupted and quarantined. Preview and confirm again.",
     blockedReasons: {
-      "readonly-install": "The model catalog is packaged read-only in this installation.",
       "inject-unavailable": "The in-process catalog registry is unavailable in this installation.",
-      "instance-mismatch": "Two module instances were detected; injection cannot be verified.",
       "install-unresolved": "The pi-ai installation could not be located.",
     },
   },
@@ -112,7 +109,6 @@ const DICTS = {
     authUnsafe: "尚不能确认授权流程已安全结束，暂不能退出或发起新的授权尝试。",
     attemptTimeout: "等待授权超时，结果仍待核实。当前不能发起新的授权尝试，请查询状态或人工核实。",
     attemptShared: "此实例已有授权正在进行。",
-    unavailable: "当前运行时缺少安全应用所需的能力，暂不能应用更改。",
     connection: "连接异常，显示的是最后确认的状态。",
     retryNow: "查询状态",
     copyFailed: "复制失败，请手动选中设备码复制。",
@@ -165,13 +161,11 @@ const DICTS = {
     retireTitle: "结束旧配置意图",
     retireConfirmText: "只结束旧意图，不回滚或撤销已发生的更改。",
     legacy: "检测到旧的共享恢复状态。不会自动应用，请在当前 profile 重新预览确认。",
-    unavailable: "当前运行时缺少安全应用所需的能力，暂不能应用更改。",
     techDetails: "技术详情",
     stateCorrupt: "恢复状态无法读取，原件已保留。请重新预览确认。",
+    unavailable: "当前运行时缺少安全应用所需的能力，暂不能应用更改。",
     blockedReasons: {
-      "readonly-install": "当前安装把模型目录打包为只读。",
       "inject-unavailable": "当前安装的进程内目录注册表不可用。",
-      "instance-mismatch": "检测到两份模块实例，注入无法核实。",
       "install-unresolved": "无法定位 pi-ai 安装。",
     },
   },
@@ -179,14 +173,7 @@ const DICTS = {
 
 const NAV_TEXTS = Object.keys(DICTS).map((locale) => DICTS[locale].nav);
 
-// 通道门控（协议 v2，T10 status refresh 块）：catalogMode ∈ file/registry/blocked/unknown。
-// file/registry 可操作；blocked/unknown 不承诺可应用 → 置灰入口并按 blockedReason 说明
-//（G02／设计§4.3「未知不承诺可应用」「按实际原因解释」）。
-function refreshBlocked(flags) {
-  const mode = flags?.catalogMode;
-  return flags?.scopeAvailable === false || mode === "blocked" || mode === "unknown";
-}
-
+// blockedReason 按具体原因给文案（refreshBlocked 已由 refresh-flow.mjs 导出，测试覆盖）。
 function blockedReasonText(t, flags) {
   const reason = flags?.blockedReason;
   if (reason && t("blockedReasons")?.[reason]) return t("blockedReasons")[reason];

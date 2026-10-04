@@ -97,7 +97,14 @@ async function syncAvailableModels(ctx, opts = {}) {
   // 无撤回/超时标记）——取数 await 期间意图已变则只记录事实，不写配置。
   if (opts.handoff) {
     const intact = typeof opts.handoffIntact === "function" ? opts.handoffIntact(opts.handoff) : false;
-    if (!intact) return;
+    if (!intact) {
+      // 计划 T4「记录跳过原因」：留可 grep 痕迹（attemptId/意图版本），不误报为失败
+      ctx.logger?.info?.(
+        "copilot-auth: first-fill skipped — handoff stale (attemptId=%s, originIntentVersion=%s)",
+        opts.handoff.attemptId ?? "?", opts.handoff.originIntentVersion ?? "?",
+      );
+      return;
+    }
   }
   // 真 CAS：携带 expectedRevision 提交，与用户并发编辑互斥（冲突抛 SETTINGS_CONFLICT）
   const desc = ctx.settings?.describe?.()?.find?.((x) => x?.ns === "llm-pi-ai");

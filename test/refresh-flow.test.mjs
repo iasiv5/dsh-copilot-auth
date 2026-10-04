@@ -1,8 +1,8 @@
 // T11：客户端模型流（协议 v2）——勾选 materialize、确认门、423/unknown、retire 闭环、
-// 预览过期重置、显式切源、双击安全。
+// 预览过期重置、显式切源、双击安全、通道门控（blocked/unknown/scope 不可用）。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { initial, reduce, advance } from "../src/refresh-flow.mjs";
+import { initial, reduce, advance, refreshBlocked } from "../src/refresh-flow.mjs";
 
 const jsonResponse = (spec) => ({
   status: spec.status ?? 200,
@@ -213,4 +213,33 @@ test("applying 期间重复 confirm 被忽略（慢响应不覆盖/双击只发�
   s = await p;
   assert.equal(s.name, "result");
   assert.equal(f.calls.filter((c) => c === A).length, 1);
+});
+
+test("通道门控：blocked/unknown/scope 不可用时入口禁用（G02），flags 经 hydrate 正确投影", async () => {
+  // hydrate 投影：blocked
+  const f1 = makeFetch();
+  f1.respond(S, { body: { refresh: { scopeAvailable: true, catalogMode: "blocked", blockedReason: "inject-unavailable" } } });
+  let s = await advance(initial, { type: "init" }, f1);
+  assert.equal(s.name, "idle");
+  assert.equal(s.flags.catalogMode, "blocked");
+  assert.equal(s.flags.blockedReason, "inject-unavailable");
+  assert.equal(refreshBlocked(s.flags), true, "blocked 入口必须禁用");
+  // unknown
+  const f2 = makeFetch();
+  f2.respond(S, { body: { refresh: { scopeAvailable: true, catalogMode: "unknown", blockedReason: "install-unresolved" } } });
+  s = await advance(initial, { type: "init" }, f2);
+  assert.equal(refreshBlocked(s.flags), true, "unknown 不承诺可应用，入口必须禁用");
+  // scope 不可用
+  const f3 = makeFetch();
+  f3.respond(S, { body: { refresh: { scopeAvailable: false, catalogMode: "file" } } });
+  s = await advance(initial, { type: "init" }, f3);
+  assert.equal(s.flags.scopeAvailable, false);
+  assert.equal(refreshBlocked(s.flags), true, "scope 不可用入口必须禁用");
+  // 可操作通道不受影响
+  const f4 = makeFetch();
+  f4.respond(S, { body: { refresh: { scopeAvailable: true, catalogMode: "registry" } } });
+  s = await advance(initial, { type: "init" }, f4);
+  assert.equal(refreshBlocked(s.flags), false, "registry 通道入口可用");
+  assert.equal(refreshBlocked({ catalogMode: "file", scopeAvailable: true }), false);
+  assert.equal(refreshBlocked({ catalogMode: null, scopeAvailable: true }), false, "旧宿主缺字段不误伤");
 });
