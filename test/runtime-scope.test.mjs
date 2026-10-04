@@ -1,6 +1,7 @@
 // T2：resolveRuntimeScope 稳定 profile 身份与私有 dataDir。
 import test from "node:test";
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { resolveRuntimeScope } from "../src/runtime-scope.mjs";
 
 test("已知 profileContext → known=true，profileId 为 16 位 hex，dataDir 位于 profile 私有目录", () => {
@@ -8,7 +9,9 @@ test("已知 profileContext → known=true，profileId 为 16 位 hex，dataDir 
   const s = resolveRuntimeScope(ctx);
   assert.equal(s.known, true);
   assert.match(s.profileId, /^[0-9a-f]{16}$/);
-  assert.deepEqual([...s.dataDir], [..."/dsh/profiles/web/copilot-auth"]);
+  // 期望值用 join 生成（Windows 下分隔符为反斜杠，硬编码 POSIX 斜杠会误报）
+  assert.equal(s.dataDir, join("/dsh/profiles/web", "copilot-auth"));
+  assert.ok(s.dataDir.startsWith(ctx.profileContext.dir), "dataDir 必须落在 profile 私有目录内");
 });
 
 test("同 dir 不同 name → 不同 profileId", () => {
