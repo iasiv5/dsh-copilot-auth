@@ -157,6 +157,9 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
       if (err?.code === "LOGOUT_FAILED") throw err;
       throw authError("LOGOUT_FAILED", "logout-failed");
     }
+    // Q38 追加修复（真机验证发现）：退出成功后清掉 attempt 残影——否则 /state 继续报告
+    // 历史「authorized」，客户端会把残影误当登录态，UI 翻回已登录，表现为「退出没作用」
+    attempt = null;
     return { ok: true };
   }
 

@@ -147,6 +147,19 @@ test("dispose：停止本页轮询，无悬挂定时器", async () => {
   assert.equal(clock.pending(), 0);
 });
 
+test("Q38 追加：logout 成功后 /state 残留 authorized attempt → 如实回到未登录（idle）", async () => {
+  const http = makeFetch();
+  const clock = fakeClock();
+  const states = [];
+  http.respond("/copilot-auth/logout", { status: 200, body: JSON.stringify({ ok: true }) });
+  http.respond("/copilot-auth/status", { body: JSON.stringify({ configured: false, authorization: { credential: "absent", capabilities: { logout: true } } }) });
+  http.respond("/copilot-auth/state", { body: JSON.stringify({ attemptId: "a1", status: "authorized", riskLatch: null }) });
+  const flow = createAuthFlow({ fetchImpl: http.fetchImpl, clock, onState: (s) => states.push(s) });
+  await flow.logout();
+  await tick();
+  assert.equal(states.at(-1).phase, "idle", "authorized 残影不是登录态，不得翻转已登录视图");
+});
+
 test("手动 refresh 恢复自动轮询并重置失败窗口", async () => {
   const http = makeFetch();
   const clock = fakeClock();

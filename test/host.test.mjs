@@ -146,6 +146,24 @@ test("status 与 logout 操作固定 credential key；静止态退出可用并�
   assert.equal(after.body.configured, false, "退出后凭据不在（删后核实）");
 });
 
+test("Q38 追加：logout 成功后 attempt 残影清空——/state 回 idle，不再把历史 authorized 当登录态", async () => {
+  const ctx = makeCtx();
+  ctx.authorization.begin = async (req) => {
+    req.interaction.notify({ message: "Enter this code", code: "C1", url: "https://github.com/login/device" });
+    ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant" } }; // SDK 授权成功即写凭据
+    return { status: "authorized" };
+  };
+  await call(handler(ctx, "/start"), { method: "POST" });
+  await new Promise((r) => setTimeout(r, 10));
+  const before = await call(handler(ctx, "/state"));
+  assert.equal(before.body.status, "authorized");
+  const out = await call(handler(ctx, "/logout"), { method: "POST" });
+  assert.equal(out.code, 200);
+  const state = await call(handler(ctx, "/state"));
+  assert.equal(state.body.status, "idle", "残影必须清空，否则客户端翻回已登录（退出没作用）");
+  assert.equal(state.body.attemptId, null);
+});
+
 test("logout 安全门：进行中尝试与风险锁存期拒绝，status capabilities 如实降级", async () => {
   // 进行中尝试：POST /start 后 attempt starting → logout 409
   const ctx = makeCtx();

@@ -149,6 +149,12 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
       emit({ phase: "idle", error: r.error?.messageKey, connectivity: "manual" });
       return;
     }
+    // Q38 追加修复（真机验证发现）：凭据已不在（configured:false）时，attempt 记录里的
+    // 「authorized」是退出前的历史残影而非登录态——如实回到未登录，不得翻转已登录视图
+    if (r.body?.status === "authorized" && body.configured !== true) {
+      emit({ phase: "idle" });
+      return;
+    }
     applySnapshot(gen, r.body);
   }
 
