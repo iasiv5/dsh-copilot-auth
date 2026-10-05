@@ -84,7 +84,7 @@ test("插件身份与路由注册", () => {
   assert.deepEqual(plugin.inject, ["webServer", "authorization", "credentials", "settings", "llm"]);
   assert.ok(ctx.routes.every((r) => r.kind === "exact"), "路由必须都是 exact");
   assert.deepEqual(ctx.routes.map((r) => r.path).sort(),
-    ["/copilot-auth/cancel", "/copilot-auth/logout", "/copilot-auth/refresh/apply", "/copilot-auth/refresh/preview", "/copilot-auth/refresh/retire", "/copilot-auth/start", "/copilot-auth/state", "/copilot-auth/status"]);
+    ["/copilot-auth/logout", "/copilot-auth/refresh/apply", "/copilot-auth/refresh/preview", "/copilot-auth/refresh/retire", "/copilot-auth/start", "/copilot-auth/state", "/copilot-auth/status"], "Q38：/cancel 路由随软撤回移除");
 });
 
 test("start 调起 begin：key/method 正确，企业域名提问自动答空串", async () => {
@@ -107,14 +107,15 @@ test("unexpected prompt 使 attempt 失败并进入 failed 态", async () => {
   assert.ok(res.body.error.includes("unexpected prompt"));
 });
 
-test("begin 以 cancelled resolve 时映射为待核实并锁存风险（D-01 软撤回，不再映射 failed）", async () => {
+test("begin 以 cancelled resolve（防御路径，Q38 后 UI 不可达）→ 映射 failed 且不设锁存", async () => {
   const ctx = makeCtx();
   ctx.authorization.begin = async () => ({ status: "cancelled" });
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 10));
   const res = await call(handler(ctx, "/state"));
-  assert.equal(res.body.status, "withdrawal-pending-unverified");
-  assert.ok(res.body.riskLatch, "cancelled 源结果也置风险锁存");
+  assert.equal(res.body.status, "failed");
+  assert.equal(res.body.error, "authorization-cancelled");
+  assert.equal(res.body.riskLatch ?? null, null, "撤回通道移除后 cancelled 无晚写风险源");
 });
 
 test("设备码 notice 经 state 可见；waiting 期间二次 start 返回 409", async () => {
@@ -156,21 +157,14 @@ test("logout 安全门：进行中尝试与风险锁存期拒绝，status capabi
   assert.equal(out.code, 409);
   assert.equal(out.body.error, "already running");
   assert.deepEqual(ctx.credentials.deleteRecordCalls, []);
-  // 风险锁存：cancelled 结局设锁存 → logout 409 logout-unsafe
-  const ctx2 = makeCtx();
-  ctx2.authorization.begin = async () => ({ status: "cancelled" });
-  await call(handler(ctx2, "/start"), { method: "POST" });
-  await new Promise((r) => setTimeout(r, 10));
-  const out2 = await call(handler(ctx2, "/logout"), { method: "POST" });
-  assert.equal(out2.code, 409);
-  assert.equal(out2.body.error, "logout-unsafe");
-  assert.deepEqual(ctx2.credentials.deleteRecordCalls, []);
+  // 风险锁存（Q38 起仅剩等待超时未核实）→ logout 409：控制器级已由 auth-host.test
+  // 「AUTH_logout：风险锁存期」覆盖（host 层无时钟注入，锁存无法在路由级廉价制造）
 });
 
 test("scope known=false（缺 profileContext）：写路由 503，status 带 scopeAvailable:false 且不伪成功", async () => {
   const ctx = makeCtx({ noProfileContext: true });
   assert.equal((await call(handler(ctx, "/start"), { method: "POST" })).code, 503);
-  assert.equal((await call(handler(ctx, "/cancel"), { method: "POST" })).code, 503);
+  assert.equal((await call(handler(ctx, "/logout"), { method: "POST" })).code, 503);
   const status = await call(handler(ctx, "/status"));
   assert.equal(status.code, 200);
   assert.equal(status.body.refresh.scopeAvailable, false);
@@ -270,14 +264,21 @@ test("已有凭据时 start 拒绝 409 already-configured：不调 begin（Q21 �
 
 // ==================== T4: 首次填充 handoff 保护 ====================
 
-test("HANDOFF_撤回后晚到的 authorized：凭据事实可见但 settings 零写入", async () => {
+// Q38：撤回移除后，「使意图版本漂移」改由直接改写 auth-intent.json 制造（等价旧 /cancel 的 bump 效果）
+const bumpIntentFile = (ctx) => {
+  const f = join(ctx.profileContext.dir, "copilot-auth", "auth-intent.json");
+  let cur = 0;
+  try { cur = JSON.parse(readFileSync(f, "utf8")).intentVersion ?? 0; } catch { }
+  writeFileSync(f, JSON.stringify({ version: 1, intentVersion: cur + 1, updatedAt: new Date().toISOString() }));
+};
+
+test("HANDOFF_意图漂移后晚到的 authorized：凭据事实可见但 settings 零写入", async () => {
   const ctx = makeCtx({ served: [{ id: "gpt-5.4" }] });
   let settle;
   ctx.authorization.begin = () => new Promise((r) => { settle = (v) => { ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } } }; r(v); }; });
   await call(handler(ctx, "/start"), { method: "POST" });
   await new Promise((r) => setTimeout(r, 5));
-  const cancelRes = await call(handler(ctx, "/cancel"), { method: "POST" }); // V2（mock 无 cancel → unavailable）
-  assert.equal(cancelRes.body.withdrawalDelivery, "unavailable");
+  bumpIntentFile(ctx); // V2：意图版本漂移（Q38 前由 /cancel 触发）
   settle({ status: "authorized" });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(ctx.settings.mutateCalls.length, 0, "晚到成功不得生成配置意图");
@@ -298,7 +299,7 @@ test("HANDOFF_取数 await 期间意图再变：提交前复核失败，不 muta
   await new Promise((r) => setTimeout(r, 5));
   settle({ status: "authorized" });
   await new Promise((r) => setTimeout(r, 5)); // runSync 进入并 await readRecord
-  await call(handler(ctx, "/cancel"), { method: "POST" }); // 取数期间 V2
+  bumpIntentFile(ctx); // 取数期间 V2：意图版本漂移（Q38 前由 /cancel 触发）
   releaseRecord({ kind: "grant", payload: { availableModelIds: ["gpt-5.4"] } });
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(ctx.settings.mutateCalls.length, 0, "提交前重核失败必须跳过写入");

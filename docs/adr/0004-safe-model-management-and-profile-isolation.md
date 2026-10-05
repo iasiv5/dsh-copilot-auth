@@ -29,3 +29,8 @@
 [ADR 0001](<0001-data-level-catalog-patch.md>)的目录只增、协议与供应链边界继续成立；单一镜像刷新与仅进程内互斥的产品边界由本决策取代。[ADR 0002](<0002-read-only-catalog-target-gate.md>)提供可写性分类的历史背景；[ADR 0003](<0003-catalog-registry-injection.md>)的注入通道继续保留，但“无写盘”“零破坏”“逐字节不变”等承诺必须限定到实际成功条件。历史记录不改写成新设计已上线，不涉及know-how热修退役。
 
 实施分为[授权与状态](<../plans/2026-10-03-copilot-authorization-state-implementation-plan.md>)及[模型事务](<../plans/2026-10-03-copilot-model-transactions-implementation-plan.md>)两份计划，需评审后另行授权执行。
+
+
+## 2026-10-05 追记（Q38）
+
+真机验证裁决：移除「请求撤回」入口与 /cancel 路由——软撤回仅能撤销本地轮询（价值自限：15 分钟等待超时自然收敛），而其进程级风险锁存造成「登录成功却不能退出」死局。等待超时锁存与退出安全门保留；意图失效与晚写防护由 intentVersion＋删除后复核继续覆盖。以设计文档 §2 Q38 为准。

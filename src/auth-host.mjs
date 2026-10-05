@@ -1,12 +1,13 @@
-// auth-host.mjs — 授权控制器（T3）：单实例尝试、软撤回＋风险锁存、禁用退出/重授权、
-// intentVersion 与首次填充 handoff。
+// auth-host.mjs — 授权控制器（T3；Q38 起软撤回已移除）：单实例尝试、等待超时风险锁存、
+// 禁用退出、intentVersion 与首次填充 handoff。
 // 契约见 docs/plans/2026-10-04-copilot-auth-models-unified-implementation-plan.md：
 //  - start：先 intentIO.bump() 持久 intentVersion+1（失败不发 begin），再 begin；202 先行语义保留
-//  - cancel：先 bump，再调用宿主撤销（invoked/unavailable/failed），设进程内 riskLatch
 //  - logout：静止态（无 LIVE attempt＋无 riskLatch）deleteRecord＋删后核实；
 //    尝试进行中/风险锁存期拒绝。「重新授权」概念随 v1.2.11 移除（退出＋登录分步即可）
-//  - onAuthorized(handoff) 仅在 outcome=authorized 且 originIntentVersion 仍当前且无撤回/超时标记时触发
+//  - onAuthorized(handoff) 仅在 outcome=authorized 且 originIntentVersion 仍当前且无超时标记时触发
 //  - riskLatch 进程级：重挂/dispose 不清；15 分钟等待超时由 snapshot 以注入 clock 惰性判定
+//  - Q38（2026-10-05）：「请求撤回」按钮与 /cancel 路由移除——撤销本地轮询的价值自限
+//    （15 分钟超时自然收敛），而其进程级锁存会把用户锁进「登录成功却不能退出」的死局
 import { randomUUID } from "node:crypto";
 import { CREDENTIAL_KEY } from "./shared.mjs";
 
@@ -74,9 +75,7 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
       startedAt: clock.now(),
       notices: [],
       originIntentVersion,
-      withdrawalRequested: false,
       timedOut: false,
-      withdrawalDelivery: undefined,
       error: undefined,
       staleIntent: false,
     };
@@ -107,7 +106,7 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
         if (attempt !== a) return;
         if (outcome && outcome.status === "authorized") {
           const versionStillCurrent = a.originIntentVersion === intentIO.read();
-          const intact = versionStillCurrent && !a.withdrawalRequested && !a.timedOut;
+          const intact = versionStillCurrent && !a.timedOut;
           a.status = "authorized";
           a.staleIntent = !intact;
           if (intact && typeof onAuthorized === "function") {
@@ -119,9 +118,9 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
             });
           }
         } else {
-          // 宿主 cancelled 只是源结果：晚写不可排除，转待核实并锁存风险（D-01 软撤回）
-          a.status = "withdrawal-pending-unverified";
-          setRiskLatch("withdrawal-unverified");
+          // Q38：撤回通道已移除，cancelled 结局防御性映射为 failed（无晚写风险源，不设锁存）
+          a.status = "failed";
+          a.error = outcome?.status === "cancelled" ? "authorization-cancelled" : "authorization-failed";
         }
       })
       .catch((err) => {
@@ -132,34 +131,9 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
     return { attemptId: a.attemptId };
   }
 
-  async function cancel() {
-    requireScope();
-    // 先持久失效本地旧意图，再发撤回调用
-    intentIO.bump();
-    let withdrawalDelivery = "unavailable";
-    if (attempt) {
-      attempt.withdrawalRequested = true;
-      if (LIVE_STATUSES.includes(attempt.status)) attempt.status = "withdrawal-pending-unverified";
-    }
-    const cancelFn = ctx.authorization?.cancel;
-    if (typeof cancelFn === "function") {
-      try {
-        await cancelFn(CREDENTIAL_KEY);
-        withdrawalDelivery = "invoked";
-      } catch {
-        withdrawalDelivery = "failed";
-      }
-    }
-    // delivery 写入 attempt：刷新页面后 /state 恢复仍如实展示「已请求撤回」事实
-    if (attempt) attempt.withdrawalDelivery = withdrawalDelivery;
-    // 任何响应都不承诺晚写停止：风险锁存待核实
-    setRiskLatch("withdrawal-requested");
-    return { withdrawalDelivery };
-  }
-
   async function logout() {
     // 退出安全条件（v1.2.10 起，经主人裁决替代 D-01 全禁策略）：
-    // ① 无进行中的授权尝试（begin 晚写窗口）② 无风险锁存（撤回/超时未核实）。
+    // ① 无进行中的授权尝试（begin 晚写窗口）② 无风险锁存（Q38 起仅剩等待超时未核实）。
     // 满足后凭据库视为静止：deleteRecord＋删除后 describe 复核；晚到写无法绝对
     // 排除，以复核与状态页如实展示兜底——退出未核实成功绝不伪报成功。
     requireScope();
@@ -204,7 +178,6 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
       url: attempt.url,
       expiresAt: attempt.expiresAt,
       waitDeadline: attempt.startedAt + WAIT_LIMIT_MS,
-      withdrawalDelivery: attempt.withdrawalDelivery,
       riskLatch,
       staleIntent: attempt.staleIntent,
       notices: [...attempt.notices],
@@ -212,15 +185,14 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
     };
   }
 
-  // T4 消费：handoff 是否仍完好（同 attempt、版本仍当前、无撤回/超时标记）
+  // T4 消费：handoff 是否仍完好（同 attempt、版本仍当前、无超时标记）
   function handoffIntact(handoff) {
     if (!attempt || !handoff) return false;
     return attempt.attemptId === handoff.attemptId
       && attempt.originIntentVersion === handoff.originIntentVersion
       && attempt.originIntentVersion === intentIO.read()
-      && !attempt.withdrawalRequested
       && !attempt.timedOut;
   }
 
-  return { start, cancel, logout, snapshot, handoffIntact };
+  return { start, logout, snapshot, handoffIntact };
 }

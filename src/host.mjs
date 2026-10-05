@@ -530,24 +530,6 @@ export function apply(ctx, opts = {}) {
 
   ctx.webServer.register({
     kind: "exact",
-    path: r.cancel,
-    handler: async (req, res) => {
-      if (!guard(req, res, "POST")) return;
-      if (!scope.known) {
-        json(res, 503, { ok: false, error: "scope-unavailable" });
-        return;
-      }
-      try {
-        const { withdrawalDelivery } = await controller.cancel();
-        json(res, 200, { ok: true, withdrawalDelivery });
-      } catch (err) {
-        json(res, 500, { ok: false, error: sanitizeAuthError(err) });
-      }
-    },
-  });
-
-  ctx.webServer.register({
-    kind: "exact",
     path: r.state,
     handler: (req, res) => {
       if (!guard(req, res, "GET")) return;

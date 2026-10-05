@@ -1,9 +1,9 @@
-// T3：授权控制器——单实例尝试、软撤回＋风险锁存、禁用退出、handoff。
+// T3：授权控制器——单实例尝试、超时风险锁存、禁用退出、handoff。（Q38：软撤回已移除）
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createAuthorizationController, WAIT_LIMIT_MS } from "../src/auth-host.mjs";
 
-function makeHarness({ begin, cancelFn } = {}) {
+function makeHarness({ begin } = {}) {
   let now = 1000;
   const clock = { now: () => now };
   const intentIO = {
@@ -17,11 +17,10 @@ function makeHarness({ begin, cancelFn } = {}) {
     },
   };
   const handoffs = [];
-  const calls = { begin: 0, cancel: 0 };
+  const calls = { begin: 0 };
   const ctx = {
     authorization: {
       begin: async (req) => { calls.begin++; return begin ? begin(req, h) : { status: "authorized" }; },
-      ...(cancelFn !== undefined ? { cancel: async (k) => { calls.cancel++; return cancelFn(k); } } : {}),
     },
     credentials: {
       describeRecord: async () => ({ configured: h.credentialsPresent === true }),
@@ -61,39 +60,12 @@ test("AUTH_start：intentVersion 先持久（bump 先于 begin），持久失败
   assert.equal(h.calls.begin, 0, "安全门失败的动作不得产生 SDK 副作用");
 });
 
-test("AUTH_start：riskLatch 存在时新 start 被拒（authUnsafe）", async () => {
+test("AUTH_start：riskLatch 存在时新 start 被拒（authUnsafe；Q38 起锁存仅来自等待超时）", async () => {
   const h = makeHarness({ begin: () => new Promise(() => {}) });
   await h.controller.start();
-  await h.controller.cancel();
+  h.advance(WAIT_LIMIT_MS + 1);
+  h.controller.snapshot(); // 惰性判定置锁存
   await assert.rejects(() => h.controller.start(), (e) => e.code === "AUTH_UNSAFE");
-});
-
-test("AUTH_cancel：先 bump 再调用宿主撤销；delivery 三态映射并设 riskLatch", async () => {
-  const cases = [
-    { name: "invoked", cancelFn: async () => {}, expect: "invoked" },
-    { name: "unavailable（宿主无 cancel）", cancelFn: undefined, expect: "unavailable" },
-    { name: "failed（撤销抛错）", cancelFn: async () => { throw new Error("boom"); }, expect: "failed" },
-  ];
-  for (const c of cases) {
-    const h = makeHarness({ begin: () => new Promise(() => {}), cancelFn: c.cancelFn });
-    await h.controller.start();
-    await new Promise((r) => setTimeout(r, 5)); // 让 begin 微任务跑完，attempt 就位
-    const v0 = h.intentIO.version;
-    const r = await h.controller.cancel();
-    assert.equal(r.withdrawalDelivery, c.expect, c.name);
-    assert.equal(h.intentIO.version, v0 + 1, `${c.name}：cancel 先持久 intentVersion+1`);
-    assert.ok(h.controller.snapshot().riskLatch, `${c.name}：riskLatch 已置`);
-    assert.equal(h.controller.snapshot().withdrawalDelivery, c.expect, `${c.name}：snapshot 如实反映 delivery（刷新后仍可见）`);
-    assert.equal(h.controller.snapshot().status, "withdrawal-pending-unverified", c.name);
-  }
-});
-
-test("AUTH_cancel：无 cancel 实现时 delivery=unavailable 且 begin 未被再次调用", async () => {
-  const h = makeHarness({ begin: () => new Promise(() => {}), cancelFn: undefined });
-  await h.controller.start();
-  const r = await h.controller.cancel();
-  assert.equal(r.withdrawalDelivery, "unavailable");
-  assert.equal(h.calls.begin, 1);
 });
 
 test("AUTH_logout：静止状态（无尝试/无锁存）→ deleteRecord＋删后核实＋bump 意图", async () => {
@@ -118,10 +90,11 @@ test("AUTH_logout：进行中尝试（begin 晚写窗口）拒绝 ATTEMPT_RUNNIN
   assert.equal(h.deleteCalls ?? 0, 0);
 });
 
-test("AUTH_logout：风险锁存期（撤回/超时未核实）拒绝 LOGOUT_UNSAFE", async () => {
+test("AUTH_logout：风险锁存期（等待超时未核实）拒绝 LOGOUT_UNSAFE", async () => {
   const h = makeHarness({ begin: () => new Promise(() => {}) });
   await h.controller.start(); // 未登录状态下的尝试（already-configured 门不拦）
-  await h.controller.cancel(); // 设 riskLatch
+  h.advance(WAIT_LIMIT_MS + 1);
+  h.controller.snapshot(); // 惰性判定置锁存
   h.credentialsPresent = true; // 模拟晚到写：锁存期内凭据出现
   await assert.rejects(() => h.controller.logout(), (e) => e.code === "LOGOUT_UNSAFE");
   assert.equal(h.deleteCalls ?? 0, 0);
@@ -146,13 +119,14 @@ test("AUTH_logout：deleteRecord 失败/返回 false → LOGOUT_FAILED", async (
   await assert.rejects(() => h2.controller.logout(), (e) => e.code === "LOGOUT_FAILED");
 });
 
-test("AUTH_outcome_cancelled：状态 withdrawal-pending-unverified 且设锁存（不再映射 failed）", async () => {
+test("AUTH_outcome_cancelled（防御路径，Q38 后 UI 不可达）：映射 failed 且不设锁存", async () => {
   const h = makeHarness({ begin: () => ({ status: "cancelled" }) });
   await h.controller.start();
   await new Promise((r) => setTimeout(r, 5));
   const s = h.controller.snapshot();
-  assert.equal(s.status, "withdrawal-pending-unverified");
-  assert.ok(s.riskLatch);
+  assert.equal(s.status, "failed", "撤回通道移除后 cancelled 无晚写风险源，防御性映射 failed");
+  assert.equal(s.error, "authorization-cancelled");
+  assert.equal(s.riskLatch ?? null, null);
 });
 
 test("AUTH_outcome_authorized：版本仍当前 → onAuthorized 收到 handoff", async () => {
@@ -165,11 +139,11 @@ test("AUTH_outcome_authorized：版本仍当前 → onAuthorized 收到 handoff"
   assert.equal(h.handoffs[0].originIntentVersion, 1);
 });
 
-test("AUTH_outcome_authorized 晚到（版本已变/已撤回）：只更新事实，不回调 handoff", async () => {
+test("AUTH_outcome_authorized 晚到（版本已变）：只更新事实，不回调 handoff", async () => {
   let settle;
   const h = makeHarness({ begin: () => new Promise((r) => { settle = r; }) });
   await h.controller.start();
-  await h.controller.cancel(); // V2
+  h.intentIO.bump(); // V2：其他显式操作使意图版本漂移
   settle({ status: "authorized" });
   await new Promise((r) => setTimeout(r, 5));
   const s = h.controller.snapshot();

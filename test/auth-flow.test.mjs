@@ -147,25 +147,6 @@ test("dispose：停止本页轮询，无悬挂定时器", async () => {
   assert.equal(clock.pending(), 0);
 });
 
-test("cancel：delivery 映射；随后轮询见 withdrawal-pending-unverified → risk 相", async () => {
-  const http = makeFetch();
-  const clock = fakeClock();
-  const states = [];
-  http.respond("/copilot-auth/cancel", { status: 200, body: JSON.stringify({ ok: true, withdrawalDelivery: "unavailable" }) });
-  http.respond("/copilot-auth/state", { body: JSON.stringify({ attemptId: "a1", status: "withdrawal-pending-unverified", riskLatch: { reason: "withdrawal-requested" } }) });
-  http.respond("/copilot-auth/start", { status: 202, body: JSON.stringify({ ok: true, attemptId: "a1" }) });
-  const flow = createAuthFlow({ fetchImpl: http.fetchImpl, clock, onState: (s) => states.push(s) });
-  await flow.start();
-  await tick();
-  await flow.cancel();
-  assert.equal(states.at(-1).withdrawalDelivery, "unavailable");
-  clock.advance(1001); // 下一轮轮询
-  await tick();
-  assert.equal(states.at(-1).phase, "risk");
-  assert.equal(states.at(-1).riskKind, "withdrawal-pending-unverified");
-  assert.equal(http.calls.filter((c) => c === "/copilot-auth/cancel").length, 1, "写操作不自动重发");
-});
-
 test("手动 refresh 恢复自动轮询并重置失败窗口", async () => {
   const http = makeFetch();
   const clock = fakeClock();

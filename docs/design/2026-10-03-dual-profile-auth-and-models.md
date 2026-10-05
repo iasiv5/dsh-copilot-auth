@@ -61,6 +61,7 @@
 | Q35 | 门控按实际diff：removed>0⟹强制live账号证据；升级确认⟺removed>0∨勾选清除定制∨空目标；纯新增/无变化单次确认且24h缓存可用；服务端apply物化时强制。 |
 | Q36 | 缓存证据下勾选首次跨入删除类时自动以同一选择升级live重预览（闩锁每预览会话至多一次）；「对齐账号与目录」快捷动作仅存在待删除候选时显示；目录条目维度总是包含并在摘要行知情。 |
 | Q37 | 2026-10-05 真机验证用户裁决：风险线常驻固定底栏后取消二次点击确认——应用为单次确认，破坏性意图（移除/清除定制/清空）以常驻风险线在操作前完整告知；升级/漂移仍重置确认指向最新预览；证据门（removed>0⟹live）不变。 |
+| Q38 | 2026-10-05 真机验证用户裁决：「请求撤回」按钮与 /cancel 路由移除——软撤回仅能撤销本地轮询（价值自限：15 分钟超时自然收敛），而其进程级锁存造成「登录成功却不能退出」死局；等待超时锁存与退出安全门保留；意图失效与晚写防护由 intentVersion＋删除复核继续覆盖。 |
 
 最终追加请求：据此写两份可评审的实施计划，随后进入评审；本轮不实现。
 
@@ -81,7 +82,7 @@
 
 同一实例只维护一个尝试。另一页面恢复同一进度，撤回影响共同尝试须说明。离开／重挂载只停本页追踪，不撤回宿主。撤回或本地等待超时产生unverified风险锁存；begin结束、一次presence、正常token轮换或本地操作版本改变都不能解除。插件重挂不能清锁存，也不靠删除本地记录解除；若无可信底层结束证据，风险状态至少维持整个当前运行进程生命周期。新的实际进程只允许在旧写者确已退出且没有未跟踪子写者的已验证生命周期边界重新核实，不能仅以新组件或新随机ID自称安全。
 
-D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；调用缺失／失败则说明未能发送。任何响应均不承诺晚写停止。当前已读目标宿主缺少安全退出／重新授权切换所需保证，这两项默认禁用，服务端同样拒绝且不调用deleteRecord或开启替换尝试。初始授权仅在本插件本实例无已知未核实风险、宿主无可见inFlight且无需替换已有授权时可发起；不承诺控制其他进程或未知外部客户端历史。保留未来可信安全路径的能力门，但本轮不改宿主、不等待其提供强取消。插件不主动删除／复制／回写旧grant；晚到SDK凭据变化显示事实，不冒称撤回成功或旧记录绝未变化。
+D-01曾采用软撤回（Q38 修订 2026-10-05：入口与 /cancel 路由已移除——撤销本地轮询的价值自限，而进程级锁存把用户锁进死局；等待超时锁存保留）：能调用宿主撤回接口时只说明请求已发送；调用缺失／失败则说明未能发送。任何响应均不承诺晚写停止。当前已读目标宿主缺少安全退出／重新授权切换所需保证，这两项默认禁用，服务端同样拒绝且不调用deleteRecord或开启替换尝试。初始授权仅在本插件本实例无已知未核实风险、宿主无可见inFlight且无需替换已有授权时可发起；不承诺控制其他进程或未知外部客户端历史。保留未来可信安全路径的能力门，但本轮不改宿主、不等待其提供强取消。插件不主动删除／复制／回写旧grant；晚到SDK凭据变化显示事实，不冒称撤回成功或旧记录绝未变化。
 
 ### 3.3 本地授权绑定与缓存（最终A）
 
@@ -117,6 +118,7 @@ D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；�
 - 摘要行常驻：应用后共N个（保留a·新增b·移除c）；目录条目维度总是包含、无跳过开关，新条目N>0时在摘要行知情。
 - 证据降级（缓存缺可信时间／过期／授权变化／local／overlay）下待删除候选锁定勾选并警示，apply拒绝删除类diff。
 - 应用为单次确认（Q37）：破坏性意图（移除/清除定制/清空）以固定底栏常驻风险线在操作前完整告知，不再二次点击；预览更换（升级/漂移重预览）后确认指向最新预览。
+- 宿主服务语义（2026-10-05 真机观察）：用户层模型列表为显式空数组时，会话侧按「未过滤」提供目录全量模型——清空操作的承诺限于列表与定制本身＋抑制首次填充回填，不承诺 picker 清空；clearRisk 文案须如实告知该后果。
 
 不更改提供方名称、代理、认证及其他路由字段。目录补充与模型列表变更仍是两个维度，同一次确认内一并应用。真正无目录、配置、恢复或运行时快照变化才是无操作，不写状态、不改变激活、不要求重启。
 
@@ -172,13 +174,10 @@ D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；�
 | attempt.waiting | 等待你在 GitHub 完成授权 | Waiting for you to authorize on GitHub |
 | attempt.finishing | 正在完成授权，请稍候… | Finishing authorization. Please wait… |
 | attempt.authorized | 授权完成 | Authorization completed |
-| attempt.withdrawal | 撤回请求已发送，结果仍待核实。 | Withdrawal requested; the outcome remains unverified. |
-| attempt.withdrawalUnavailable | 未能向宿主发送撤回请求，结果仍待核实。 | The withdrawal request could not be sent to the host; the outcome remains unverified. |
 | authUnsafe | 尚不能确认授权流程已安全结束，暂不能退出或发起新的授权尝试。 | Safe completion of the authorization flow is unconfirmed. Sign-out and a new authorization attempt are unavailable. |
 | attempt.timeout | 等待授权超时，结果仍待核实。当前不能发起新的授权尝试，请查询状态或人工核实。 | Authorization wait timed out; the outcome remains unverified. A new authorization attempt is unavailable. Check the status or verify it manually. |
 | attempt.shared | 此实例已有授权正在进行。 | An authorization attempt is already running in this instance. |
 | login / reauthorize / logout | 授权登录／重新授权／退出登录 | Sign in / Reauthorize / Sign out |
-| withdrawAuth | 请求撤回 | Request withdrawal |
 | codeHint | 打开 GitHub 授权页面，输入以下设备码。完成后返回此页，状态会自动更新。 | Open the GitHub authorization page and enter this device code. Return here when done; the status updates automatically. |
 | copy / copied | 复制／已复制 | Copy / Copied |
 | copyFailed | 复制失败，请手动选中设备码复制。 | Copy failed. Select and copy the device code manually. |

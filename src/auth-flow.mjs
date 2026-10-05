@@ -1,9 +1,9 @@
-// auth-flow.mjs — 浏览器授权状态机（T5）：串行请求、代次保护、轮询退避、卸载停止。
-// 契约：createAuthFlow({fetchImpl, clock, onState}) -> {init, start, cancel, refresh, dispose}
+// auth-flow.mjs — 浏览器授权状态机（T5；Q38 起「请求撤回」已移除）：串行请求、代次保护、轮询退避、卸载停止。
+// 契约：createAuthFlow({fetchImpl, clock, onState}) -> {init, start, logout, refresh, dispose}
 //  - 单一 init 聚合 /status；start 202 → 轮询；409 → attempt.shared 并转入对现有 attempt 的轮询
 //  - 请求代次（generation）保护：慢响应不得覆盖新操作；dispose 仅停止本页请求
 //  - 轮询 1 秒；连续读取失败退避 1/2/4/8/15 秒封顶；累计失败 60 秒转手动（connectivity=manual）
-//  - 写操作（start/cancel）绝不自动重发
+//  - 写操作（start）绝不自动重发
 import { requestJson } from "./client-http.mjs";
 
 const POLL_INTERVAL_MS = 1000;
@@ -61,7 +61,7 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
       emit({ phase: "failed", error: s?.error ?? "authorization-failed" });
       return;
     }
-    if (s?.status === "withdrawal-pending-unverified" || s?.status === "timed-out-unverified") {
+    if (s?.status === "timed-out-unverified") {
       emit({ phase: "risk", riskKind: s.status });
       return;
     }
@@ -189,16 +189,6 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
     emit({ phase: "failed", error: errorCode ?? r.error?.messageKey });
   }
 
-  async function cancel() {
-    // 写操作：单次调用，绝不自动重发
-    const r = await requestJson(fetchImpl, "/copilot-auth/cancel", { method: "POST" });
-    if (r.ok) {
-      emit({ withdrawalDelivery: r.body?.withdrawalDelivery ?? "unavailable" });
-      return;
-    }
-    emit({ withdrawalDelivery: "failed", error: r.error?.details?.errorCode ?? r.error?.messageKey });
-  }
-
   async function logout() {
     // 退出登录（写操作，单次调用）：pending 态 → 成功后完整重跑 init 恢复真实
     // 状态（若晚到写把凭据写了回来，init 会如实显示 authorized，绝不伪报已退出）；
@@ -230,5 +220,5 @@ export function createAuthFlow({ fetchImpl, clock = defaultClock(), onState = ()
     clearTimer();
   }
 
-  return { init, start, cancel, logout, refresh, dispose };
+  return { init, start, logout, refresh, dispose };
 }

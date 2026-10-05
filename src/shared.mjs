@@ -8,7 +8,6 @@ export const routes = () => ({
   state: `${ROUTE_PREFIX}/state`,
   status: `${ROUTE_PREFIX}/status`,
   logout: `${ROUTE_PREFIX}/logout`,
-  cancel: `${ROUTE_PREFIX}/cancel`,
   refreshPreview: `${ROUTE_PREFIX}/refresh/preview`,
   refreshApply: `${ROUTE_PREFIX}/refresh/apply`,
   refreshRetire: `${ROUTE_PREFIX}/refresh/retire`,

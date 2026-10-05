@@ -24,9 +24,6 @@ const DICTS = {
     loading: "…",
     login: "Sign in",
     logout: "Sign out",
-    withdrawAuth: "Request withdrawal",
-    withdrawal: "Withdrawal requested; the outcome remains unverified.",
-    withdrawalUnavailable: "The withdrawal request could not be sent to the host; the outcome remains unverified.",
     authUnsafe: "Safe completion of the authorization flow is unconfirmed. Sign-out and a new authorization attempt are unavailable.",
     attemptTimeout: "Authorization wait timed out; the outcome remains unverified. A new authorization attempt is unavailable. Check the status or verify it manually.",
     attemptShared: "An authorization attempt is already running in this instance.",
@@ -62,7 +59,7 @@ const DICTS = {
     customizedBadge: "Customized",
     clearOverrides: "Also clear all model customizations.",
     inheritedOverrides: "Inherited model customizations cannot be cleared here.",
-    clearRisk: "This clears the Copilot model list and its model customizations.",
+    clearRisk: "This clears the Copilot model list and its model customizations. Afterwards the provider serves the full catalog unfiltered (login will not auto-refill).",
     applyChanges: "Apply changes",
     removalRisk: "{count} listed model(s) will be removed; their customizations are removed with them.",
     summaryLine: "After applying: {total} model(s) — {kept} kept · {added} added · {removed} removed",
@@ -115,9 +112,6 @@ const DICTS = {
     loading: "…",
     login: "授权登录",
     logout: "退出登录",
-    withdrawAuth: "请求撤回",
-    withdrawal: "撤回请求已发送，结果仍待核实。",
-    withdrawalUnavailable: "未能向宿主发送撤回请求，结果仍待核实。",
     authUnsafe: "尚不能确认授权流程已安全结束，暂不能退出或发起新的授权尝试。",
     attemptTimeout: "等待授权超时，结果仍待核实。当前不能发起新的授权尝试，请查询状态或人工核实。",
     attemptShared: "此实例已有授权正在进行。",
@@ -152,7 +146,7 @@ const DICTS = {
     customizedBadge: "有定制",
     clearOverrides: "同时清除全部模型定制。",
     inheritedOverrides: "存在继承的模型定制，无法在此清除。",
-    clearRisk: "本次将清空 Copilot 模型列表并清除其模型定制。",
+    clearRisk: "本次将清空 Copilot 模型列表并清除其模型定制。清空后该提供方会按「未过滤」提供目录全量模型（登录不会自动回填）。",
     applyChanges: "应用更改",
     removalRisk: "将移除 {count} 个在列模型，其定制随之清除。",
     summaryLine: "应用后共 {total} 个：保留 {kept} · 新增 {added} · 移除 {removed}",
@@ -596,9 +590,6 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
     setCopyFail(false);
     void authFlowRef.current?.start();
   };
-  const withdraw = () => {
-    void authFlowRef.current?.cancel(); // 请求撤回：单次调用，结果待核实
-  };
   const checkStatus = () => {
     void authFlowRef.current?.refresh();
   };
@@ -666,19 +657,11 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
               {copyFail && <p style={styles.error}>{t("copyFailed")}</p>}
             </div>
           )}
-          <div>
-            <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={withdraw}>{t("withdrawAuth")}</button>
-          </div>
         </>
       )}
       {phase === "risk" && (
         <div style={styles.card}>
           <p style={styles.banner}>⚠ {t("authUnsafe")}</p>
-          {auth.riskKind === "withdrawal-pending-unverified" && (
-            <p style={styles.modalText}>
-              {auth.withdrawalDelivery === "invoked" ? t("withdrawal") : t("withdrawalUnavailable")}
-            </p>
-          )}
           {auth.riskKind === "timed-out-unverified" && <p style={styles.modalText}>{t("attemptTimeout")}</p>}
           <div>
             <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={checkStatus}>{t("retryNow")}</button>

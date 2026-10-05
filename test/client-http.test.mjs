@@ -83,9 +83,8 @@ test("shared 契约：前缀/凭据键不变，新路由与协议版本就位", 
   assert.deepEqual(r.state, "/copilot-auth/state");
   assert.deepEqual(r.status, "/copilot-auth/status");
   assert.deepEqual(r.logout, "/copilot-auth/logout");
-  assert.deepEqual(r.cancel, "/copilot-auth/cancel");
   assert.deepEqual(r.refreshPreview, "/copilot-auth/refresh/preview");
   assert.deepEqual(r.refreshApply, "/copilot-auth/refresh/apply");
   assert.deepEqual(r.refreshRetire, "/copilot-auth/refresh/retire");
-  assert.equal(Object.keys(r).length, 8);
+  assert.equal(Object.keys(r).length, 7, "Q38：/cancel 路由随软撤回移除");
 });
