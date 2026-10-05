@@ -1,6 +1,6 @@
 # 双 profile 授权与模型管理设计规格
 
-状态：2026-10-03 经31项问答确认，后按用户D-01裁决及最终“确定A”收敛修订；**目标设计，尚未实现**。本阶段仅文档及独立复核，不授权编码、部署、发版、真实授权或重启。最新范围替代此前“宿主必须提供库级持久授权边界”的方向。
+状态：2026-10-03 经31项问答确认，后按用户D-01裁决及最终“确定A”收敛修订；主体已按[2026-10-04 统一实施计划](<../plans/2026-10-04-copilot-auth-models-unified-implementation-plan.md>)实现（v1.2.18）。**2026-10-05 增补「管理模型列表」修订（§2 Q32–Q36、§4、§5、§6、[ADR 0005](<../adr/0005-manage-model-list-target-state-editing.md>)），该修订为目标设计，尚未实现**；实现前不授权编码、部署、发版、真实授权或重启。最新范围替代此前“宿主必须提供库级持久授权边界”的方向。
 
 ## 阅读入口
 
@@ -12,9 +12,9 @@
 
 - G01：Node.js >=20；保持现有发布 peer `@deepseek-ai/cordis: ^4.0.2`，不升级 DSH 或 pi-ai 代码。
 - G02：DSH 0.1.7-rc.2、0.2.0-rc.1、0.2.0-rc.2 为兼容目标；能力门禁与验证结果分别记录，不把版本范围当成无条件能力保证。
-- G03：保留导航“GHC设置”／“GHC Settings”；正文标题使用 GitHub Copilot，操作为“授权登录／请求撤回／重新授权／退出登录”“补充模型”“重建模型列表”“应用更改”；unsafe退出／重新授权必须禁用并说明。
+- G03：保留导航“GHC设置”／“GHC Settings”；正文标题使用 GitHub Copilot，操作为“授权登录／请求撤回／退出登录”“管理模型列表”“应用更改”；unsafe退出／重新授权必须禁用并说明。（2026-10-05：「补充模型」「重建模型列表」双入口并入「管理模型列表」）
 - G04：沿用 `/copilot-auth` 路由前缀和 `llm-pi-ai/github-copilot` 凭据键；en/zh 主信息等义；技术详情折叠并脱敏。
-- G05：模型补充默认非破坏性；全量重建单独确认；底层目录只增不覆盖已有描述；不写官方归档、不通过路由级单协议绕过混合协议目录、不新增提供方路由。
+- G05：模型列表管理为目标状态编辑：被保留模型及其定制默认保留，删除类变更需实时账号证据与升级确认；底层目录只增不覆盖已有描述；不写官方归档、不通过路由级单协议绕过混合协议目录、不新增提供方路由。（2026-10-05 修订，替代「补充默认非破坏＋全量重建单独确认」）
 - G06：共享宿主凭据库与公共安装目录数据，隔离 profile 配置、刷新事务、激活、缓存和诊断；遵循宿主 DSH_HOME 与稳定 profile 身份。
 - G07：预览有效期 10 分钟；缓存可应用上限 24 小时且绑定同一本地授权绑定；断网状态自动重试最多 60 秒；无上游有效期时本地授权等待上限 15 分钟，以上均是产品策略而非 GitHub 保证。
 - G08：不自动重启、不增加长期备份或用户撤销、不自动发送推理请求；真实授权、重启和可能耗配额的验证另获授权。
@@ -55,6 +55,11 @@
 | Q29 | 经当前运行时验证的纯配置变化可立即生效；需要重新加载目录才待重启。 |
 | Q30 | 最终A：本profile经本插件接受的显式操作先使本地旧意图失效；观察到稳定凭据身份变化也失效；不保证未观察的其他参与者同材料ABA，公共目录数据不回删。 |
 | Q31 | 允许带持久恢复、条件恢复与真实验证的临时快照切换；优先可靠宿主接口。 |
+| Q32 | 2026-10-05：「补充模型／重建模型列表」双入口合并为单一「管理模型列表」（目标状态编辑），勾选集合即期望终态，移除成为一等能力；替代Q1的双入口结论。 |
+| Q33 | 待删除候选（在列但账号未报告／目录无法解析）默认不勾选＝删除提案，可重新勾选挽留；降级证据下锁定保留；apply 服务端拒绝删除类 diff；替代Q15的无条件保留，「不暗删」哲学由「提案可见＋可挽留＋确认升级」兑现。 |
+| Q34 | 被保留模型的定制全保留，移除携带定制消失；「同时清除全部定制」复选框仅在存在可清除定制时出现，存在仅继承覆盖时禁用并说明，不阻断成员编辑。 |
+| Q35 | 门控按实际diff：removed>0⟹强制live账号证据；升级确认⟺removed>0∨勾选清除定制∨空目标；纯新增/无变化单次确认且24h缓存可用；服务端apply物化时强制。 |
+| Q36 | 缓存证据下勾选首次跨入删除类时自动以同一选择升级live重预览（闩锁每预览会话至多一次）；「对齐账号与目录」快捷动作仅存在待删除候选时显示；目录条目维度总是包含并在摘要行知情。 |
 
 最终追加请求：据此写两份可评审的实施计划，随后进入评审；本轮不实现。
 
@@ -101,19 +106,26 @@ D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；�
 
 ## 4. 模型管理契约
 
-### 4.1 两种用户操作
+### 4.1 管理模型列表（目标状态编辑，2026-10-05 修订）
 
-补充：保留当前完整模型对象、顺序、参数与 modelOverrides，只在末尾加入用户勾选的合格候选（去重，按预览展示顺序）。当前缺失项不等价于新模型：可能曾被用户精简，因此全部候选初始不勾选。不可用或不可解析的现有项仅警告；若保留它们导致宿主拒绝提交则阻止补充，指明问题项。
+单一操作「管理模型列表」取代原「补充／重建」双入口。弹窗为一张按状态分组的全表：可新增（账号∩可解析−在列，默认不勾）、在列（默认勾选）、待删除候选（在列但账号未报告或目录无法解析，默认不勾＝删除提案，可重新勾选挽留）。勾选集合即期望终态，应用时目标＝勾选集合；新增按预览展示顺序追加末尾，被保留模型维持现有对象、顺序、参数与modelOverrides。
 
-重建：目标为实时账号报告集合与可解析目录的交集，按预览的稳定顺序重建纯ID条目并在同一受保护配置提交中清除modelOverrides；不更改提供方名称、代理、认证及其他路由字段。显示全部删除和参数损失；仅有列表裁剪也须说明会恢复全量，不能只靠字段定制数组判断有无破坏性风险。可信空目标需独立确认；该确认绑定预览，变化后失效。
+- 删除提案必须可挽留且原因分列（账号未报告／目录无法解析），不一概称失效；「缺失≠意图」由「提案可见＋可挽留＋确认升级」兑现，而非无条件保留（修订Q15）。
+- 被移除模型的定制随模型一起消失，无需unset；「同时清除全部定制」仅在存在可清除定制时出现，存在仅继承覆盖（raw缺失而effective有）时禁用并说明，不阻断成员编辑。
+- 快捷动作：全选（含待删除候选）、取消全选、「对齐账号与目录」（仅存在待删除候选时显示，勾选态设为账号∩可解析）；三者只设定勾选状态，风险仍由实际diff决定。
+- 摘要行常驻：应用后共N个（保留a·新增b·移除c）；目录条目维度总是包含、无跳过开关，新条目N>0时在摘要行知情。
+- 证据降级（缓存缺可信时间／过期／授权变化／local／overlay）下待删除候选锁定勾选并警示，apply拒绝删除类diff。
+- 空目标（全不勾）沿用独立确认，绑定预览，变化后失效；纯新增或无变化单次确认。
 
-目录补充与模型列表变更分开展示。零勾选但目录有新数据仍可经明确确认应用目录；真正无目录、配置、恢复或运行时快照变化才是无操作，不写状态、不改变激活、不要求重启。
+不更改提供方名称、代理、认证及其他路由字段。目录补充与模型列表变更仍是两个维度，同一次确认内一并应用。真正无目录、配置、恢复或运行时快照变化才是无操作，不写状态、不改变激活、不要求重启。
 
 ### 4.2 证据与预览
 
 可解析集合包括磁盘目录、当前宿主认可的运行时注入项及经校验的新目录条目；自有注册表可见不等于宿主列表真的端出。预览分别给出新目录条目、列表候选／新增／移除／保留、参数重置、不可解析项、规范化跳过与合并校验跳过、来源版本／时间／失败原因。移除原因用“未包含在本次账号列表”“当前目录无法解析”，不一概称失效。
 
-服务端快照绑定稳定profile身份、当前本地授权绑定、raw配置完整内容与revision、磁盘摘要、运行时摘要、目录来源内容／版本、账号证据采集时间、操作策略和选择。client不能任意换目标ID或改来源。10分钟过期或事实漂移返回重新预览；提交不重新下载不同的“latest”内容。必要的账号事实复核失败不使重建悄悄退化为缓存重建。
+服务端快照绑定稳定profile身份、当前本地授权绑定、raw配置完整内容与revision、磁盘摘要、运行时摘要、目录来源内容／版本、账号证据采集时间、操作策略和选择。client不能任意换目标ID或改来源。10分钟过期或事实漂移返回重新预览；提交不重新下载不同的“latest”内容。必要的账号事实复核失败不使操作悄悄退化为缓存证据。
+
+门控按实际diff导出（2026-10-05）：移除类变更（removed>0）强制live账号证据，缓存不足格；升级确认⟺removed>0∨勾选清除定制∨空目标；纯新增与无变化可单次确认且24小时缓存可用。缓存证据下勾选状态首次跨入删除类时，客户端自动以同一选择发起live重预览（每次预览会话闩锁至多一次），previewId更换后必须重新确认。服务端在apply物化diff时独立强制以上规则，client不可信。
 
 普通网络失败可展示本地／缓存降级并按规则应用；完整性、解包、目录形状等安全／兼容异常必须明确阻止当前在线应用。用户显式切换已验证的本地／内置来源会生成新的预览，不能自动使用内置数据。内置目录必须展示随包数据源版本与非最新性质。
 
@@ -173,23 +185,29 @@ D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；�
 | logoutPending | 正在退出登录并核实结果… | Signing out and checking the result… |
 | logoutFailed | 退出登录未完成，授权凭据仍可能存在。请重试。 | Sign-out did not complete; authorization credentials may remain. Please retry. |
 | unsupportedEnterprise | 暂不支持自定义 GitHub Enterprise 域名，请使用 github.com 账号。 | Custom GitHub Enterprise domains are not supported. Use an account on github.com. |
-| supplement / rebuild | 补充模型／重建模型列表 | Add models / Rebuild model list |
+| manageModels | 管理模型列表 | Manage model list |
 | catalogChanges / listChanges | 目录条目变化／模型列表变化 | Catalog entry changes / Model list changes |
-| candidates / selectAll | 可新增的模型／全选 | Models available to add / Select all |
+| groupAddable / groupListed / groupRemoval | 可新增／在列／待删除候选 | Available to add / In list / Proposed for removal |
+| selectAll / selectNone / alignAction | 全选／取消全选／对齐账号与目录 | Select all / Deselect all / Align with account & catalog |
 | confirm / cancel | 应用更改／取消 | Apply changes / Cancel |
-| supplementRisk | 将保留现有模型及定制，只添加你勾选的模型。 | Existing models and customizations will be kept. Only selected models will be added. |
-| rebuildRisk | 将按本次可信账号列表重建 Copilot 模型配置，并清除下列模型参数与覆盖配置。其他提供方设置不变。 | This rebuilds Copilot model configuration from the verified account list and clears the model customizations below. Other provider settings remain unchanged. |
+| removalRisk | 将移除 {count} 个在列模型，其定制随之清除。 | {count} listed models will be removed; their customizations are removed with them. |
+| clearOverrides | 同时清除全部模型定制。 | Also clear all model customizations. |
+| inheritedOverrides | 存在继承的模型定制，无法在此清除。 | Inherited model customizations cannot be cleared here. |
 | clearRisk | 本次将清空 Copilot 模型列表并清除其模型定制。请单独确认清空。 | This clears the Copilot model list and its model customizations. Confirm clearing separately. |
-| removed.account | 未包含在本次账号模型列表 | Not included in this account model list |
-| removed.unresolvable | 当前目录无法解析 | Not resolvable by the current catalog |
+| removed.account | 账号未报告 | Not reported by this account |
+| removed.unresolvable | 目录无法解析 | Not resolvable by the current catalog |
+| retain | 挽留：重新勾选以保留 | Keep: re-check to retain |
 | source.live | 账号模型：实时获取 | Account models: live |
-| source.cache | 账号模型：缓存，获取于 {time}，仅可用于补充 | Account models: cached at {time}; add-only use |
+| source.cache | 账号模型：缓存，获取于 {time}；移除类更改需升级为实时证据 | Account models: cached at {time}; removals require live upgrade |
 | source.stale | 缓存缺少可信时间、已过期或授权已变化，仅供参考。 | The cache has no trusted timestamp, is expired, or belongs to changed authorization; reference only. |
 | source.local | 本地目录数据，不代表最新目录 | Local catalog data; not necessarily the latest |
 | source.overlay | 插件内置目录数据，来源版本 {version}，可能不是最新 | Bundled catalog data from {version}; it may not be current |
 | previewStale | 配置或数据已变化，请重新预览并确认。 | Configuration or data changed. Preview and confirm again. |
 | authChanged | 授权信息已变化，请重新预览。 | Authorization changed. Preview again. |
 | noChanges | 无需更改。 | No changes are needed. |
+| summaryLine | 应用后共 {total} 个：保留 {kept} · 新增 {added} · 移除 {removed} | After applying: {total} models — {kept} kept · {added} added · {removed} removed |
+| catalogNotice | 目录将新增 {count} 条描述 | {count} catalog entries will be added |
+| removalNeedsLive | 移除类更改需要实时账号证据 | Removals require live account evidence |
 | applied | 更改已生效，无需重启。 | Changes are active. No restart is needed. |
 | pendingRestart | 更改已保存，待重启生效。请重启运行此实例的服务或应用；仅刷新页面不会生效。 | Changes are saved and require restarting this instance's service or application. Refreshing the page alone is not enough. |
 | conflict | 配置已变化。为保护你的修改，请重新预览并确认。 | Configuration changed. To protect your edits, preview and confirm again. |
@@ -204,7 +222,7 @@ D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；�
 | security | 目录数据未通过完整性或兼容检查，本次在线应用已停止。 | Catalog data failed integrity or compatibility checks. This online operation was stopped. |
 | unavailable | 当前运行时缺少安全应用所需的能力，暂不能应用更改。 | This runtime lacks the capabilities needed to apply changes safely. |
 
-动态值不得拼入未经脱敏的异常文本。模型ID和条目损失用可复制列表；技术字段modelOverrides可在详情解释为模型覆盖配置。显示真实profile与实际落地方式，但主信息面向结果。只有存在删除／损失时显示对应风险；重建的全量恢复后果始终说明。
+动态值不得拼入未经脱敏的异常文本。模型ID和条目损失用可复制列表；技术字段modelOverrides可在详情解释为模型覆盖配置。显示真实profile与实际落地方式，但主信息面向结果。只有存在移除／损失时显示对应风险；删除类变更的证据要求与确认升级始终说明。
 
 弹窗具可访问名称、焦点圈定、背景隔离、Esc取消（仅可取消阶段）、关闭后恢复焦点；危险确认初始焦点在取消。状态、复制与错误可被辅助技术读出；应用中只读进度，无隐藏后台按钮可触达。
 
@@ -220,8 +238,8 @@ D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；�
 | A04 | 排队／已开始／先settle后晚写；请求撤回及超时始终准确待核实；unsafe退出／新尝试前后端均拒绝；组件重挂不解除风险。 |
 | A05 | 本profile已接受显式操作先失效旧绑定；正常token轮换保留观察ID；真实材料变化失效；形状／观察读取未知受限；不同profile不共享本地操作版本。 |
 | A06 | 仅有效原尝试首次成功可填充；start V1→已接受withdraw V2（发送失败／不可用）→晚到authorized只更新事实，models mutate=0；正常成功的新观察ID可填充；取数／提交中版本变化拒绝，空列表／合成层／覆盖不重置。 |
-| M01 | 补充完整保留模型对象／顺序／覆盖，候选不预选，勾选ID合法且无重复。 |
-| M02 | 两通道重建清同样字段；不改其他路由；空目标独立确认。 |
+| M01 | 管理模型列表：在列模型对象／顺序／定制完整保留；可新增与待删除候选默认不勾选；勾选集合即终态，勾选ID合法且无重复；待删除候选可挽留且原因分列。 |
+| M02 | 移除携带定制消失；「清除全部定制」仅在有可清除定制时可选，仅继承覆盖时禁用并说明；不改其他路由字段；空目标独立确认。 |
 | M03 | live/cache/missing/expired区分；24小时与AuthBinding变化；缓存不可重建；库级停机同材料ABA不作检测承诺。 |
 | M04 | 已注入模型在npm失败后不误归删除；磁盘可见不冒充当前宿主已加载。 |
 | M05 | 规范化与合并跳过全部显示；安全失败阻止隐式降级；明确切源生成新预览。 |
@@ -234,6 +252,8 @@ D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；�
 | M12 | 配置错误不被目录标记清理吞掉；boot真实宿主验证失败保留诊断与意图。 |
 | M13 | 旧共享状态不跨端消费；非默认DSH_HOME；未知profile／schema／版本阻止写。 |
 | M14 | 插件升级保留激活；同pi-ai恢复；跨基线gate；授权在待重启期间变化。 |
+| M15 | 删除类门控：removed>0⟹live＋二次确认；清除定制／空目标⟹二次确认但不强制live；纯新增缓存可用；降级来源锁定待删除候选并拒绝删除类apply；服务端独立强制。 |
+| M16 | 缓存下首次跨入删除类自动live升级（闩锁每会话一次），previewId更换后重新确认；「对齐账号与目录」仅漂移时显示；全选含待删除候选。 |
 | U01 | en/zh等义；保留GHC导航；复制失败、键盘弹窗、读屏状态与危险确认。 |
 | E01 | Linux web真实安装形态，构建正确下发到现有GUI，刷新后核对效果。 |
 | E02 | Windows desktop真实asar，apply+二次操作+重启后宿主列表仍可见。 |
@@ -244,6 +264,6 @@ D-01采用软撤回：能调用宿主撤回接口时只说明请求已发送；�
 
 ## 7. 历史语义保全与变更范围
 
-原词汇表混合了术语、机制与规格。本次保全到此处：旧自动路径仅首次填充，已有配置让路；旧“手动刷新”是单一镜像式重建，现拆成补充与重建；不增加长期备份的裁决继续保留，恢复能力不能被称为任何时刻都能还原定制。原“安装／升级未激活”订正为全新无状态实例未激活。原两阶段目录加载约束在真实写盘需要跨启动时继续适用，不能套到已验证的纯配置变更。显式耦合的账号模型适配仍只做只读GET /models，不自实现token获取／刷新／policy修改；现有0.84.4适配与当前目标运行时必须做差异校验，失败不自动应用不可信集合。供应链的integrity、限额、严格解包、URL与schema守卫继续保留。
+原词汇表混合了术语、机制与规格。本次保全到此处：旧自动路径仅首次填充，已有配置让路；旧“手动刷新”是单一镜像式重建，先拆成补充与重建（2026-10-03），2026-10-05起再合并为「管理模型列表」（ADR 0005）；不增加长期备份的裁决继续保留，恢复能力不能被称为任何时刻都能还原定制。原“安装／升级未激活”订正为全新无状态实例未激活。原两阶段目录加载约束在真实写盘需要跨启动时继续适用，不能套到已验证的纯配置变更。显式耦合的账号模型适配仍只做只读GET /models，不自实现token获取／刷新／policy修改；现有0.84.4适配与当前目标运行时必须做差异校验，失败不自动应用不可信集合。供应链的integrity、限额、严格解包、URL与schema守卫继续保留。
 
 历史ADR与现行README继续描述v1.2.7；原desktop注入／快照／重启方案继续复用。后续用户先选宿主持久边界、再经范围核对明确“确定A”；最终A替代前一方向，Q11软撤回与本地绑定是当前唯一目标。评审不得把旧三轮对更强目标的阻断或本规格当成新代码已上线。
