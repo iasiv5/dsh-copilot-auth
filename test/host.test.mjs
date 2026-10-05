@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { tgz } from "./helpers.mjs";
 import plugin from "../src/host.mjs";
+import { PROTOCOL_VERSION } from "../src/shared.mjs";
 
 function makeCtx(script = {}, opts = {}) {
   const ctx = {
@@ -419,17 +420,17 @@ test("REFRESH_V2_协议门禁：缺 protocolVersion → 400 upgrade-required；�
   const noProto = await post(ctx, "/refresh/preview", { operation: "supplement" });
   assert.equal(noProto.code, 400);
   assert.equal(noProto.body.error, "upgrade-required");
-  const badSource = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "supplement", catalogSource: "bogus" });
+  const badSource = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", catalogSource: "bogus" });
   assert.equal(badSource.code, 400);
   assert.equal(badSource.body.error, "invalid-catalog-source");
-  const badOp = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "mirror" });
+  const badOp = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "mirror" });
   assert.equal(badOp.code, 400);
   assert.equal(badOp.body.error, "invalid-operation");
 });
 
 test("REFRESH_V2_preview live：证据/来源/差异/跳过项就位，候选默认不勾选", async () => {
   const ctx = makeRefreshCtx();
-  const res = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "supplement", selectedIds: [] });
+  const res = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: [] });
   assert.equal(res.code, 200);
   const b = res.body;
   assert.equal(b.evidence.source, "live");
@@ -441,8 +442,8 @@ test("REFRESH_V2_preview live：证据/来源/差异/跳过项就位，候选默
 
 test("REFRESH_V2_apply file 通道：当次零 settings 写、pending-restart、目录落地；boot 后 applied", async () => {
   const ctx = makeRefreshCtx({ applyOps: true });
-  const pv = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "supplement", selectedIds: ["gpt-b"] });
-  const ap = await post(ctx, "/refresh/apply", { protocolVersion: 2, previewId: pv.body.previewId, operationId: pv.body.operationId });
+  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const ap = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(ap.code, 200);
   assert.equal(ap.body.result.status, "pending-restart");
   assert.equal(ctx.settings.mutateCalls.length, 0, "file 通道配置提交延迟到 boot");
@@ -471,10 +472,10 @@ test("REFRESH_V2_apply file 通道：当次零 settings 写、pending-restart、
 
 test("REFRESH_V2_幂等：同 operationId 重复 apply 返回已知结果且不重复执行", async () => {
   const ctx = makeRefreshCtx({ applyOps: true });
-  const pv = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "supplement", selectedIds: ["gpt-b"] });
-  const first = await post(ctx, "/refresh/apply", { protocolVersion: 2, previewId: pv.body.previewId, operationId: pv.body.operationId });
+  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const first = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(first.body.result.status, "pending-restart");
-  const again = await post(ctx, "/refresh/apply", { protocolVersion: 2, previewId: pv.body.previewId, operationId: pv.body.operationId });
+  const again = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(again.code, 200);
   assert.equal(again.body.idempotent, true);
   assert.equal(again.body.result.status, "pending-restart");
@@ -482,29 +483,29 @@ test("REFRESH_V2_幂等：同 operationId 重复 apply 返回已知结果且不�
 
 test("REFRESH_V2_忙与 retire：activeOperation 未终结时新 apply 423；retire 闭环后放行", async () => {
   const ctx = makeRefreshCtx({ applyOps: true });
-  const pv1 = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "supplement", selectedIds: ["gpt-b"] });
-  await post(ctx, "/refresh/apply", { protocolVersion: 2, previewId: pv1.body.previewId, operationId: pv1.body.operationId });
-  const pv2 = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "supplement", selectedIds: [] });
-  const busy = await post(ctx, "/refresh/apply", { protocolVersion: 2, previewId: pv2.body.previewId, operationId: pv2.body.operationId });
+  const pv1 = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv1.body.previewId, operationId: pv1.body.operationId });
+  const pv2 = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: [] });
+  const busy = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv2.body.previewId, operationId: pv2.body.operationId });
   assert.equal(busy.code, 423);
   assert.equal(busy.body.error, "resource-busy");
-  const retire = await post(ctx, "/refresh/retire", { protocolVersion: 2, operationId: pv1.body.operationId });
+  const retire = await post(ctx, "/refresh/retire", { protocolVersion: PROTOCOL_VERSION, operationId: pv1.body.operationId });
   assert.equal(retire.code, 200);
   assert.equal(retire.body.result.status, "intent-retired");
-  const after = await post(ctx, "/refresh/apply", { protocolVersion: 2, previewId: pv2.body.previewId, operationId: pv2.body.operationId });
+  const after = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv2.body.previewId, operationId: pv2.body.operationId });
   assert.equal(after.code, 200, "旧意图显式结束后新 apply 放行");
 });
 
 test("REFRESH_V2_status 三态：active／last／unknown；字段齐备且 GET 不写探针", async () => {
   const ctx = makeRefreshCtx({ applyOps: true });
-  const pv = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "supplement", selectedIds: ["gpt-b"] });
-  const ap = await post(ctx, "/refresh/apply", { protocolVersion: 2, previewId: pv.body.previewId, operationId: pv.body.operationId });
+  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const ap = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(ap.body.result.status, "pending-restart");
   const active = await call(handler(ctx, "/status"), { url: `/copilot-auth/status?operationId=${pv.body.operationId}` });
   assert.equal(active.body.operation.query, "active");
   const unknown = await call(handler(ctx, "/status"), { url: "/copilot-auth/status?operationId=never" });
   assert.equal(unknown.body.operation.query, "unknown");
-  await post(ctx, "/refresh/retire", { protocolVersion: 2, operationId: pv.body.operationId });
+  await post(ctx, "/refresh/retire", { protocolVersion: PROTOCOL_VERSION, operationId: pv.body.operationId });
   const last = await call(handler(ctx, "/status"), { url: `/copilot-auth/status?operationId=${pv.body.operationId}` });
   assert.equal(last.body.operation.query, "last");
   assert.equal(last.body.operation.lastResult.status, "intent-retired");
@@ -539,8 +540,8 @@ test("REFRESH_V2_registry 通道：只读安装树 apply 当次注入＋提交�
     injectRegistry: async () => ({ ok: true, injected: ["gpt-b"], present: [], via: "bare" }),
     fetchImpl: fetchImplFor({ live: "ok", npm: "ok", latestCatalog: latestWithGptb(), modelsData: [pickerOn("gpt-a"), pickerOn("gpt-b")] }),
   });
-  const pv = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "supplement", selectedIds: ["gpt-b"] });
-  const ap = await post(ctx, "/refresh/apply", { protocolVersion: 2, previewId: pv.body.previewId, operationId: pv.body.operationId });
+  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const ap = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(ap.code, 200);
   assert.equal(ap.body.result.status, "applied");
   assert.equal(ctx.settings.mutateCalls.length, 1);
@@ -557,10 +558,10 @@ test("REFRESH_V2_rebuild：空交集未单独确认 → 409；确认后允许清
     catalogFile: makeInstall().catalogFile,
     fetchImpl: fetchImplFor({ live: "ok", modelsData: [] }), // 账号权威空集合；npm 失败回 local
   });
-  const denied = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "rebuild" });
+  const denied = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "rebuild" });
   assert.equal(denied.code, 409);
   assert.equal(denied.body.error, "empty-intersection-unconfirmed");
-  const ok = await post(ctx, "/refresh/preview", { protocolVersion: 2, operation: "rebuild", confirmEmpty: true });
+  const ok = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "rebuild", confirmEmpty: true });
   assert.equal(ok.code, 200);
   assert.deepEqual(ok.body.diff.targetView.models, []);
 });

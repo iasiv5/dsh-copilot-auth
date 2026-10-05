@@ -77,7 +77,7 @@ test("写调用失败不自动重发（fetch 恰好调用一次）", async () =>
 test("shared 契约：前缀/凭据键不变，新路由与协议版本就位", () => {
   assert.equal(CREDENTIAL_KEY, "llm-pi-ai/github-copilot");
   assert.equal(ROUTE_PREFIX, "/copilot-auth");
-  assert.equal(PROTOCOL_VERSION, 2);
+  assert.equal(PROTOCOL_VERSION, 3, "v3：manage 目标状态编辑（ADR 0005）");
   const r = routes();
   assert.deepEqual(r.start, "/copilot-auth/start");
   assert.deepEqual(r.state, "/copilot-auth/state");

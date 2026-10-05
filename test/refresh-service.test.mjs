@@ -5,6 +5,7 @@ import { mkdtempSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRefreshService } from "../src/refresh-service.mjs";
+import { PROTOCOL_VERSION } from "../src/shared.mjs";
 
 const INDIVIDUAL_TOKEN = "tid=1;exp=2;proxy-ep=proxy.individual.githubcopilot.com;";
 
@@ -94,7 +95,7 @@ const errCode = async (p) => (await p.then(() => null, (e) => e.code));
 
 test("preview live 成功：快照就位、evidence=live、缓存写入 fetchedAt+intentVersion", async () => {
   const h = makeHarness();
-  const p = await h.service.preview({ protocolVersion: 2, operation: "supplement", selectedIds: ["new-1"] });
+  const p = await h.service.preview({ protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["new-1"] });
   assert.equal(p.ok, true);
   assert.equal(p.evidence.source, "live");
   assert.equal(p.diff.added.length, 1);

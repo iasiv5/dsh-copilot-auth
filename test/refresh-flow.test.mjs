@@ -3,6 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { initial, reduce, advance, refreshBlocked } from "../src/refresh-flow.mjs";
+import { PROTOCOL_VERSION } from "../src/shared.mjs";
 
 const jsonResponse = (spec) => ({
   status: spec.status ?? 200,
@@ -76,7 +77,7 @@ test("预览→确认：候选就位、勾选经 basePreviewId materialize、确
   assert.equal(s.result.status, "applied");
   const applyBody = f.bodies.find((x) => x.url === A);
   assert.deepEqual([applyBody.body.previewId, applyBody.body.operationId], ["pv-2", "op-2"]);
-  assert.equal(applyBody.body.protocolVersion, 2);
+  assert.equal(applyBody.body.protocolVersion, PROTOCOL_VERSION);
 });
 
 test("select 物化期间留在 confirming（materializing），预览原位替换——弹窗不卸载重挂", async () => {

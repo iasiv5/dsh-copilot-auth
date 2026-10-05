@@ -2,7 +2,7 @@
 // client 侧 fetch 硬编码同一路径，配置一旦漂移 client 即 404（见计划附录 B）。
 export const CREDENTIAL_KEY = "llm-pi-ai/github-copilot";
 export const ROUTE_PREFIX = "/copilot-auth";
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3; // v3：manage 目标状态编辑（ADR 0005）；v2 为 supplement/rebuild 双入口
 export const routes = () => ({
   start: `${ROUTE_PREFIX}/start`,
   state: `${ROUTE_PREFIX}/state`,
