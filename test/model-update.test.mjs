@@ -1,4 +1,5 @@
-// T6：buildModelChange 纯策略——补充/重建、writeSet、继承限制。
+// T6（v3）：buildModelChange manage 目标状态语义——rows 三态、增删留与原因、
+// 定制随模型走、空目标显式确认、clearOverrides、writeSet。
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildModelChange } from "../src/model-update.mjs";
@@ -9,118 +10,174 @@ const view = (models, modelOverrides = null) => ({
   modelOverridesPresent: modelOverrides !== null,
   modelOverrides,
 });
-const RAW_EMPTY = view(null, null);
 
-test("补充：默认空选择 → 列表零变化、完整保留对象/顺序/modelOverrides", () => {
+// 账号：a/d/e 在账号且可解析；dead-cat 在账号但不可解析；b 可解析；ghost 两者皆非
+const BASE = {
+  operation: "manage",
+  accountIds: ["a", "b", "c", "d", "dead-cat", "e"],
+  resolvableIds: ["a", "b", "c", "d", "e"],
+};
+
+test("默认选择＝在列∩(账号∩可解析)：健康在列全保（对象/顺序逐字）、writeSet 全 false", () => {
   const models = [{ id: "a", displayName: "我的A" }, { id: "b" }, { id: "c", maxTokens: 99 }];
   const raw = view(models, { a: { displayName: "x" } });
-  const r = buildModelChange({
-    operation: "supplement", rawView: raw, effectiveView: raw,
-    accountIds: ["a", "b", "c", "d"], resolvableIds: ["a", "b", "c", "d", "e"], selectedIds: [],
-  });
+  const r = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw });
   assert.equal(r.allowed, true);
+  assert.deepEqual(r.selectedIds, ["a", "b", "c"]);
   assert.deepEqual(r.targetView.models, models, "现有对象逐字保留（含顺序与定制字段）");
   assert.deepEqual(r.targetView.modelOverrides, { a: { displayName: "x" } });
+  assert.equal(r.targetView.modelOverridesPresent, true);
   assert.deepEqual(r.added, []);
-  assert.equal(r.writeSet.models, false);
-  assert.equal(r.writeSet.modelOverrides, false);
+  assert.deepEqual(r.removed, []);
+  assert.equal(r.removalClass, false);
+  assert.deepEqual(r.writeSet, { catalogEntries: false, models: false, modelOverrides: false, overridesUnclearable: false });
 });
 
-test("补充：勾选追加——只接受可解析且去重，非法选择进 warnings", () => {
-  const raw = view([{ id: "a" }]);
+test("默认选择漂移：removal-proposal 全部进 removed 且带原因，removalClass=true", () => {
+  const raw = view([{ id: "a" }, { id: "dead-acc" }, { id: "dead-cat" }]);
   const r = buildModelChange({
-    operation: "supplement", rawView: raw, effectiveView: raw,
-    accountIds: ["b", "c", "ghost"], resolvableIds: ["a", "b", "c", "d"],
-    selectedIds: ["b", "b", "c", "d", "ghost", "a"],
+    ...BASE, accountIds: ["a", "dead-cat", "e"], resolvableIds: ["a", "e"],
+    rawView: raw, effectiveView: raw,
   });
-  assert.deepEqual(r.added, ["b", "c"], "ghost 不可解析、d 不在账号列表、a 已存在，均不入列");
+  assert.deepEqual(r.removed, [
+    { id: "dead-acc", reason: "not-in-account" },
+    { id: "dead-cat", reason: "unresolvable" },
+  ]);
+  assert.equal(r.removalClass, true);
+  assert.deepEqual(r.selectedIds, ["a"]);
+  assert.deepEqual(r.added, []);
+});
+
+test("勾选候选：追加末尾且按账号预览顺序（与勾选顺序无关）", () => {
+  const raw = view([{ id: "a" }]);
+  const r = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw, selectedIds: ["a", "c", "b"] });
+  assert.deepEqual(r.removed, [], "在列行保持勾选 → 无移除");
+  assert.deepEqual(r.added, ["b", "c"], "候选按账号报告顺序追加");
   assert.deepEqual(r.targetView.models, [{ id: "a" }, { id: "b" }, { id: "c" }]);
-  assert.ok(r.warnings.some((w) => w.id === "ghost" && w.reason === "unresolvable"));
-  assert.ok(r.warnings.some((w) => w.id === "a" && w.reason === "already-configured"));
-  assert.ok(r.warnings.some((w) => w.id === "d" && w.reason === "invalid-selection"), "不在账号列表的选择无效");
+  assert.equal(r.targetView.modelsPresent, true);
   assert.equal(r.writeSet.models, true);
 });
 
-test("补充：raw 未配置 models 时勾选创建列表；零勾选保持未配置", () => {
-  const r1 = buildModelChange({
-    operation: "supplement", rawView: RAW_EMPTY, effectiveView: RAW_EMPTY,
-    accountIds: ["a", "b"], resolvableIds: ["a", "b"], selectedIds: ["b"],
-  });
-  assert.deepEqual(r1.targetView.models, [{ id: "b" }]);
-  assert.equal(r1.targetView.modelsPresent, true);
-  const r2 = buildModelChange({
-    operation: "supplement", rawView: RAW_EMPTY, effectiveView: RAW_EMPTY,
-    accountIds: ["a"], resolvableIds: ["a"], selectedIds: [],
-  });
-  assert.equal(r2.targetView.modelsPresent, false, "零勾选不创建配置");
-  assert.equal(r2.writeSet.models, false);
+test("取消勾选：健康行 reason=unchecked；removal-proposal 行按原因；定制随移除消失、其他保留", () => {
+  const raw = view(
+    [{ id: "a", displayName: "定制A" }, { id: "b" }, { id: "dead-acc" }, { id: "dead-cat" }],
+    { a: { displayName: "x" }, "dead-acc": { y: 1 } },
+  );
+  const r = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw, selectedIds: ["a"] });
+  assert.deepEqual(r.removed, [
+    { id: "b", reason: "unchecked" },
+    { id: "dead-acc", reason: "not-in-account" },
+    { id: "dead-cat", reason: "unresolvable" },
+  ]);
+  assert.equal(r.removalClass, true);
+  assert.deepEqual(r.targetView.modelOverrides, { a: { displayName: "x" } }, "被移除模型定制不保留，其他保留");
+  assert.equal(r.targetView.modelOverridesPresent, true);
+  assert.equal(r.writeSet.models, true);
 });
 
-test("重建：纯 ID 列表＋清空本路由 modelOverrides；removed 带原因；kept 就位", () => {
-  const raw = view([{ id: "a", displayName: "定制" }, { id: "dead" }], { a: { displayName: "x" }, dead: { y: 1 } });
+test("取消勾选唯一定制模型 → modelOverridesPresent:false（unset 防重加复活定制）", () => {
+  const raw = view([{ id: "a" }, { id: "b" }], { a: { displayName: "x" } });
+  const r = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw, selectedIds: ["b"] });
+  assert.deepEqual(r.removed, [{ id: "a", reason: "unchecked" }]);
+  assert.equal(r.targetView.modelOverridesPresent, false);
+  assert.equal(r.targetView.modelOverrides, null);
+});
+
+test("挽留：removal-proposal 行显式勾选 → 进 kept、不进 removed、其定制保留", () => {
+  const raw = view([{ id: "a" }, { id: "dead-acc" }], { "dead-acc": { y: 1 } });
   const r = buildModelChange({
-    operation: "rebuild", rawView: raw, effectiveView: raw,
-    accountIds: ["b", "a", "ghost"], resolvableIds: ["a", "b"], selectedIds: [], confirmEmpty: false,
+    ...BASE, accountIds: ["a"], resolvableIds: ["a"],
+    rawView: raw, effectiveView: raw, selectedIds: ["a", "dead-acc"],
   });
+  assert.deepEqual(r.kept, ["a", "dead-acc"]);
+  assert.deepEqual(r.removed, []);
+  assert.equal(r.removalClass, false);
+  assert.deepEqual(r.targetView.modelOverrides, { "dead-acc": { y: 1 } });
+  assert.equal(r.writeSet.models, false, "勾选集＝原集合 → 零变化");
+});
+
+test("rows 三态、customized 标记与原因优先级；rows 不随勾选变化", () => {
+  const raw = view([{ id: "a" }, { id: "dead-acc" }, { id: "dead-cat" }], { a: { o: 1 }, "dead-acc": { p: 2 } });
+  const inputs = { ...BASE, accountIds: ["a", "dead-cat", "e"], resolvableIds: ["a", "e"], rawView: raw, effectiveView: raw };
+  const r = buildModelChange({ ...inputs, selectedIds: [], confirmEmpty: true });
+  const byId = Object.fromEntries(r.rows.map((x) => [x.id, x]));
+  assert.deepEqual(byId.e, { id: "e", status: "addable", customized: false });
+  assert.deepEqual(byId.a, { id: "a", status: "listed", customized: true });
+  assert.deepEqual(byId["dead-acc"], { id: "dead-acc", status: "removal-proposal", reason: "not-in-account", customized: true });
+  assert.deepEqual(byId["dead-cat"], { id: "dead-cat", status: "removal-proposal", reason: "unresolvable", customized: false });
+  const r2 = buildModelChange({ ...inputs, selectedIds: ["a", "e"] });
+  assert.deepEqual(r2.rows, r.rows, "rows 按来源固定，不随勾选迁移");
+});
+
+test("clearOverrides：布尔清零、值置 null、writeSet.modelOverrides=true、meta 就位", () => {
+  const raw = view([{ id: "a" }, { id: "b" }], { a: { displayName: "x" } });
+  const r = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw, clearOverrides: true });
   assert.equal(r.allowed, true);
-  assert.deepEqual(r.targetView.models, [{ id: "b" }, { id: "a" }], "按账号顺序的纯 ID 条目");
-  assert.equal(r.targetView.modelOverridesPresent, false, "重建清空本路由 modelOverrides");
-  assert.deepEqual(r.added, ["b"]);
-  assert.deepEqual(r.removed, [{ id: "dead", reason: "not-in-account" }], "dead 不在账号列表");
-  assert.deepEqual(r.kept, ["a"]);
-  assert.equal(r.writeSet.models, true);
+  assert.equal(r.targetView.modelOverridesPresent, false);
+  assert.equal(r.targetView.modelOverrides, null);
   assert.equal(r.writeSet.modelOverrides, true);
+  assert.deepEqual(r.overridesMeta, { rawPresent: true, clearable: true, inheritedOnly: false });
 });
 
-test("重建：账号有但目录不可解析的现有项按 unresolvable 移除", () => {
-  const raw = view([{ id: "ghost" }, { id: "a" }]);
-  const r = buildModelChange({
-    operation: "rebuild", rawView: raw, effectiveView: raw,
-    accountIds: ["ghost", "a"], resolvableIds: ["a"], selectedIds: [],
-  });
-  assert.deepEqual(r.removed, [{ id: "ghost", reason: "unresolvable" }]);
-});
-
-test("重建：空交集需 confirmEmpty=true 才允许", () => {
-  const raw = view([{ id: "a" }]);
-  const base = { operation: "rebuild", rawView: raw, effectiveView: raw, accountIds: [], resolvableIds: ["a"], selectedIds: [] };
-  const denied = buildModelChange({ ...base, confirmEmpty: false });
-  assert.equal(denied.allowed, false);
-  assert.equal(denied.reason, "empty-intersection-unconfirmed");
-  const ok = buildModelChange({ ...base, confirmEmpty: true });
-  assert.equal(ok.allowed, true);
-  assert.deepEqual(ok.targetView.models, []);
-  assert.deepEqual(ok.removed, [{ id: "a", reason: "not-in-account" }]);
-});
-
-test("重建：base 继承的 modelOverrides 无法经用户层清除 → 受限并说明", () => {
+test("clearOverrides 且仅继承覆盖 → allowed:false inherited-overrides-unclearable", () => {
   const raw = view([{ id: "a" }], null);
-  const eff = view([{ id: "a" }], { a: { displayName: "base 定制" } });
-  const r = buildModelChange({
-    operation: "rebuild", rawView: raw, effectiveView: eff,
-    accountIds: ["a"], resolvableIds: ["a"], selectedIds: [],
-  });
+  const eff = view([{ id: "a" }], { a: { inherited: true } });
+  const r = buildModelChange({ ...BASE, rawView: raw, effectiveView: eff, clearOverrides: true });
   assert.equal(r.allowed, false);
   assert.equal(r.reason, "inherited-overrides-unclearable");
+  assert.equal(r.writeSet.overridesUnclearable, true);
+  assert.deepEqual(r.overridesMeta, { rawPresent: false, clearable: false, inheritedOnly: true });
 });
 
-test("补充：不可解析的现有项保留并出 warning（不暗删，Q15）", () => {
-  const raw = view([{ id: "a" }, { id: "ghost" }]);
-  const r = buildModelChange({
-    operation: "supplement", rawView: raw, effectiveView: raw,
-    accountIds: ["a", "b"], resolvableIds: ["a", "b"], selectedIds: ["b"],
+test("空目标：显式 [] 需 confirmEmpty；确认后落显式空列表；rawIds=0 无需确认；默认路径全漂移放行", () => {
+  const raw = view([{ id: "a" }, { id: "b" }]);
+  const denied = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw, selectedIds: [] });
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.reason, "empty-target-unconfirmed");
+  const ok = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw, selectedIds: [], confirmEmpty: true });
+  assert.equal(ok.allowed, true);
+  assert.equal(ok.targetView.modelsPresent, true, "显式空列表＝已配置（防首次填充回填）");
+  assert.deepEqual(ok.targetView.models, []);
+  assert.equal(ok.writeSet.models, true);
+  const emptyCfg = view([]);
+  const noop = buildModelChange({ ...BASE, rawView: emptyCfg, effectiveView: emptyCfg, selectedIds: [] });
+  assert.equal(noop.allowed, true, "rawIds=0 无清除对象，不需要 confirmEmpty");
+  assert.equal(noop.writeSet.models, false);
+  const drift = buildModelChange({
+    ...BASE, accountIds: ["x2", "e"], resolvableIds: ["e"],
+    rawView: view([{ id: "x1" }, { id: "x2" }]), effectiveView: view([{ id: "x1" }, { id: "x2" }]),
   });
-  assert.deepEqual(r.targetView.models.map((m) => m.id), ["a", "ghost", "b"], "ghost 保留原位");
-  assert.ok(r.warnings.some((w) => w.id === "ghost" && w.reason === "unresolvable"));
+  assert.equal(drift.allowed, true, "默认路径（无 selectedIds）不受空目标确认约束");
+  assert.deepEqual(drift.removed, [
+    { id: "x1", reason: "not-in-account" },
+    { id: "x2", reason: "unresolvable" },
+  ]);
+  assert.equal(drift.removalClass, true);
 });
 
-test("writeSet：目录增量独立成维（零勾选＋目录增量不是 no-change）", () => {
+test("无配置零选择：无操作；目录增量只进 catalogEntries", () => {
+  const raw = view(null);
+  const r = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw });
+  assert.equal(r.allowed, true);
+  assert.deepEqual(r.selectedIds, []);
+  assert.equal(r.targetView.modelsPresent, false);
+  assert.deepEqual(r.writeSet, { catalogEntries: false, models: false, modelOverrides: false, overridesUnclearable: false });
+  const withCatalog = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw, catalogNewEntryCount: 2 });
+  assert.equal(withCatalog.writeSet.catalogEntries, true);
+  assert.equal(withCatalog.writeSet.models, false);
+});
+
+test("非法选择过滤＋warnings（去重保序）；非 manage operation 拒绝", () => {
   const raw = view([{ id: "a" }]);
-  const r = buildModelChange({
-    operation: "supplement", rawView: raw, effectiveView: raw,
-    accountIds: ["a", "b"], resolvableIds: ["a", "b"], selectedIds: [], catalogNewEntryCount: 2,
-  });
-  assert.equal(r.writeSet.catalogEntries, true);
-  assert.equal(r.writeSet.models, false);
-  assert.equal(r.writeSet.modelOverrides, false);
+  const r = buildModelChange({ ...BASE, rawView: raw, effectiveView: raw, selectedIds: ["a", "a", "b", "ghost", "dead-cat"] });
+  assert.deepEqual(r.selectedIds, ["a", "b", "ghost", "dead-cat"], "去重保序，非法不过滤只警告");
+  assert.ok(r.warnings.some((w) => w.id === "ghost" && w.reason === "invalid-selection"));
+  assert.ok(r.warnings.some((w) => w.id === "dead-cat" && w.reason === "unresolvable"), "在账号但不可解析且不在列 → unresolvable");
+  assert.deepEqual(r.added, ["b"]);
+  const bad = buildModelChange({ ...BASE, operation: "supplement", rawView: raw, effectiveView: raw, selectedIds: [] });
+  assert.equal(bad.allowed, false);
+  assert.equal(bad.reason, "invalid-operation");
+  const bad2 = buildModelChange({ ...BASE, operation: "rebuild", rawView: raw, effectiveView: raw, selectedIds: [] });
+  assert.equal(bad2.allowed, false);
+  assert.equal(bad2.reason, "invalid-operation");
 });
