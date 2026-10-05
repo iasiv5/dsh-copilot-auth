@@ -1,6 +1,6 @@
 # dsh-copilot-auth 领域词汇表
 
-统一授权与模型管理的用词。行为规则与实现约束见[双 profile 设计规格](<docs/design/2026-10-03-dual-profile-auth-and-models.md>)；其中保留范围已按[2026-10-04 统一实施计划](<docs/plans/2026-10-04-copilot-auth-models-unified-implementation-plan.md>)实现（T0–T12，2026-10-04）。2026-10-05 起操作语义收敛为「管理模型列表」（目标状态编辑），设计文档与 ADR 0005 修订进行中。
+统一授权与模型管理的用词。行为规则与实现约束见[双 profile 设计规格](<docs/design/2026-10-03-dual-profile-auth-and-models.md>)；其中保留范围已按[2026-10-04 统一实施计划](<docs/plans/2026-10-04-copilot-auth-models-unified-implementation-plan.md>)实现（T0–T12，2026-10-04）。2026-10-05 起操作语义收敛为「管理模型列表」（目标状态编辑），修订已落地（见设计文档 §4.1 与 ADR 0005；真机人工验证待执行）。
 
 ## 授权
 
