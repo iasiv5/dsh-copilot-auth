@@ -119,41 +119,29 @@ test("预览→确认：勾选经 basePreviewId materialize、纯新增单次确
   assert.equal(applyBody.body.protocolVersion, PROTOCOL_VERSION);
 });
 
-test("确认门矩阵：removed>0 / clearOverrides / 空目标 各自需二次确认；纯新增单次放行", async () => {
+test("确认门（Q37 单次确认）：删除类/清除定制/空目标均一次放行，风险线前置告知；stale/materializing 仍拦截", async () => {
   const f = makeFetch();
   f.respond(A, { body: { ok: true, operationId: "op-1", result: { status: "applied" } } });
-  // 纯新增：单次确认
-  f.respond(P, { body: previewBody({ previewId: "pv-add", added: ["b"], selectedIds: ["a", "b"] }) });
-  let s = await advance(initial, { type: "start", operation: "manage" }, f);
-  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
-  assert.equal(s.name, "result", "纯新增单次确认放行");
-  // removed>0：缺二次确认被拒
+  // 删除类：单次确认直接应用（破坏性意图已由底栏常驻风险线前置告知）
   f.respond(P, { body: withRemoval({ previewId: "pv-rm" }) });
-  s = await advance(initial, { type: "start", operation: "manage" }, f);
-  let before = f.calls.length;
-  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
-  assert.equal(s.name, "confirming");
-  assert.equal(f.calls.length, before, "删除类缺二次确认不发 apply");
-  s = await advance(s, { type: "confirm", second: true, empty: false }, f);
-  assert.equal(s.name, "result");
-  // clearOverrides：缺二次确认被拒
+  let s = await advance(initial, { type: "start", operation: "manage" }, f);
+  s = await advance(s, { type: "confirm" }, f);
+  assert.equal(s.name, "result", "删除类单次确认放行");
+  // 清除定制：单次
   f.respond(P, { body: previewBody({ previewId: "pv-co", clearOverrides: true, overridesMeta: { rawPresent: true, clearable: true, inheritedOnly: false } }) });
   s = await advance(initial, { type: "start", operation: "manage" }, f);
-  before = f.calls.length;
-  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
-  assert.equal(s.name, "confirming");
-  assert.equal(f.calls.length, before, "清除定制缺二次确认不发 apply");
-  s = await advance(s, { type: "confirm", second: true, empty: false }, f);
+  s = await advance(s, { type: "confirm" }, f);
   assert.equal(s.name, "result");
-  // 空目标：二次确认之外还需 empty 单独确认
+  // 空目标：单次（clearRisk 已在底栏前置显示，不再要求独立确认点击）
   f.respond(P, { body: withRemoval({ previewId: "pv-empty", selectedIds: [], removed: [{ id: "a", reason: "unchecked" }] }) });
   s = await advance(initial, { type: "start", operation: "manage" }, f);
-  before = f.calls.length;
-  s = await advance(s, { type: "confirm", second: true, empty: false }, f);
-  assert.equal(s.name, "confirming", "空目标未单独确认不发 apply");
-  assert.equal(f.calls.length, before);
-  s = await advance(s, { type: "confirm", second: true, empty: true }, f);
+  s = await advance(s, { type: "confirm" }, f);
   assert.equal(s.name, "result");
+  // 旧 second/empty 事件字段被忽略：携带与否行为一致
+  f.respond(P, { body: withRemoval({ previewId: "pv-legacy" }) });
+  s = await advance(initial, { type: "start", operation: "manage" }, f);
+  s = await advance(s, { type: "confirm", second: false, empty: false }, f);
+  assert.equal(s.name, "result", "旧二次确认字段不再拦截");
 });
 
 test("select 事件字段透传：selectedIds/clearOverrides/confirmEmpty 进 effect（含空目标派生）", async () => {

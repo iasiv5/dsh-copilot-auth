@@ -219,12 +219,8 @@ export function reduce(state, event) {
       if (event.type === "confirm") {
         if (state.materializing) return [state, null]; // 物化/升级在途不得用旧 previewId 应用
         if (p.evidence?.stale === true) return [state, null]; // stale 证据不可应用（Q7）
-        // 确认门按实际 diff（Q35/R1）：removed>0 ∨ 清除定制 ∨ 空目标 → 二次确认
-        const removedCount = (p.diff?.removed ?? []).length;
-        const emptyTarget = (p.diff?.selectedIds ?? []).length === 0 && p.hadModels === true;
-        const needsEscalate = removedCount > 0 || p.clearOverrides === true || emptyTarget;
-        if (needsEscalate && event.second !== true) return [state, null];
-        if (emptyTarget && event.empty !== true) return [state, null]; // 清空需单独确认
+        // 单次确认（Q37 用户裁决）：破坏性意图已由固定底栏常驻风险线在操作前完整告知，
+        // 不再要求二次点击；证据门（removals-need-live）由服务端独立兜底
         return [{ name: "applying", flags: state.flags ?? initial.flags, preview: p }, { type: "apply", previewId: p.previewId, operationId: p.operationId }];
       }
       if (event.type === "cancel") return [{ ...initial, flags: state.flags ?? initial.flags, lastResult: state.lastResult ?? null }, null];

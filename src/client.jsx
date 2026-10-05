@@ -62,8 +62,7 @@ const DICTS = {
     customizedBadge: "Customized",
     clearOverrides: "Also clear all model customizations.",
     inheritedOverrides: "Inherited model customizations cannot be cleared here.",
-    clearRisk: "This clears the Copilot model list and its model customizations. Confirm clearing separately.",
-    secondConfirm: "This is destructive. Click again to confirm.",
+    clearRisk: "This clears the Copilot model list and its model customizations.",
     applyChanges: "Apply changes",
     removalRisk: "{count} listed model(s) will be removed; their customizations are removed with them.",
     summaryLine: "After applying: {total} model(s) — {kept} kept · {added} added · {removed} removed",
@@ -153,8 +152,7 @@ const DICTS = {
     customizedBadge: "有定制",
     clearOverrides: "同时清除全部模型定制。",
     inheritedOverrides: "存在继承的模型定制，无法在此清除。",
-    clearRisk: "本次将清空 Copilot 模型列表并清除其模型定制。请单独确认清空。",
-    secondConfirm: "此操作具有破坏性，请再次点击确认。",
+    clearRisk: "本次将清空 Copilot 模型列表并清除其模型定制。",
     applyChanges: "应用更改",
     removalRisk: "将移除 {count} 个在列模型，其定制随之清除。",
     summaryLine: "应用后共 {total} 个：保留 {kept} · 新增 {added} · 移除 {removed}",
@@ -368,21 +366,15 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
   const removedCount = rawAllIds.length - keptCount;
   const total = keptCount + addedCount;
   const emptyTarget = confirmEmptyOf(selected);
-  const needsEscalate = removedCount > 0 || coChecked || emptyTarget;
   const applyBlocked = isStale || (removedCount > 0 && (p.evidence?.source !== "live" || degradedCatalog));
-  const [stage, setStage] = useState(0); // 0 常规｜1 已警示待二次确认｜2 已警示待清空确认
   const cancelRef = useRef(null);
   const surface = useRef(null);
   if (!surface.current) surface.current = sampleThemeSurface();
-  useEffect(() => { setStage(0); }, [p.previewId]); // 预览/选择变化重置确认（漂移必再确认）
-  useEffect(() => { if (stage > 0) cancelRef.current?.focus(); }, [stage]);
   const escCancel = (e) => { if (e.key === "Escape") onCancel(); };
+  // 单次确认（Q37）：破坏性意图由底栏常驻风险线前置告知，点击即应用
   const confirmClick = () => {
     if (isStale || applyBlocked) return; // reducer 双保险
-    if (!needsEscalate) { onConfirm({ second: false, empty: false }); return; }
-    if (stage === 0) { setStage(1); return; }
-    if (emptyTarget && stage === 1) { setStage(2); return; }
-    onConfirm({ second: true, empty: emptyTarget });
+    onConfirm({});
   };
   const sourceLine = [
     p.evidence?.source === "live" ? t("srcLive")
@@ -474,14 +466,13 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
         </div>
         <div style={{ padding: "8px 20px 16px" }}>
           {/* 风险线常驻固定底栏（用户实测反馈：埋在滚动区底部看不到告警、误以为按钮失灵）——
-              移除/清除定制意图自勾选一刻即显示（stage 0 即时反馈），stage≥1 追加二次确认提示，
-              空目标 stage 2 追加清空确认；无论滚动位置何在都必然可见 */}
-          {(removedCount > 0 || coChecked || stage >= 1) && (
+              移除/清除定制/清空意图自勾选一刻即显示（单次确认 Q37：告知前置，非点击计数），
+              无论滚动位置何在都必然可见 */}
+          {(removedCount > 0 || coChecked || emptyTarget) && (
             <div style={{ marginBottom: 4 }}>
               {removedCount > 0 && <p style={styles.risk}>⚠ {t("removalRisk").replace("{count}", String(removedCount))}</p>}
               {coChecked && <p style={styles.risk}>⚠ {t("clearOverrides")}</p>}
-              {stage >= 1 && removedCount === 0 && <p style={styles.risk}>⚠ {t("secondConfirm")}</p>}
-              {emptyTarget && stage >= 2 && <p style={styles.risk}>⚠ {t("clearRisk")}</p>}
+              {emptyTarget && <p style={styles.risk}>⚠ {t("clearRisk")}</p>}
             </div>
           )}
           {/* 摘要行常驻：知情（Q36）；与风险线同源计数 */}
