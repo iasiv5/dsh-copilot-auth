@@ -452,10 +452,6 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
               </label>
             </div>
           )}
-          {stage >= 1 && removedCount > 0 && <p style={styles.risk}>⚠ {t("removalRisk").replace("{count}", String(removedCount))}</p>}
-          {stage >= 1 && coChecked && <p style={styles.risk}>⚠ {t("clearOverrides")}</p>}
-          {stage >= 1 && removedCount === 0 && <p style={styles.risk}>⚠ {t("secondConfirm")}</p>}
-          {emptyTarget && stage >= 2 && <p style={styles.risk}>⚠ {t("clearRisk")}</p>}
           {(p.skipped ?? []).length > 0 && (
             <details style={styles.modalText}>
               <summary>{t("skippedModels")}（{p.skipped.length}）</summary>
@@ -477,6 +473,17 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
           )}
         </div>
         <div style={{ padding: "8px 20px 16px" }}>
+          {/* 风险线常驻固定底栏（用户实测反馈：埋在滚动区底部看不到告警、误以为按钮失灵）——
+              移除/清除定制意图自勾选一刻即显示（stage 0 即时反馈），stage≥1 追加二次确认提示，
+              空目标 stage 2 追加清空确认；无论滚动位置何在都必然可见 */}
+          {(removedCount > 0 || coChecked || stage >= 1) && (
+            <div style={{ marginBottom: 4 }}>
+              {removedCount > 0 && <p style={styles.risk}>⚠ {t("removalRisk").replace("{count}", String(removedCount))}</p>}
+              {coChecked && <p style={styles.risk}>⚠ {t("clearOverrides")}</p>}
+              {stage >= 1 && removedCount === 0 && <p style={styles.risk}>⚠ {t("secondConfirm")}</p>}
+              {emptyTarget && stage >= 2 && <p style={styles.risk}>⚠ {t("clearRisk")}</p>}
+            </div>
+          )}
           {/* 摘要行常驻：知情（Q36）；与风险线同源计数 */}
           <p style={{ ...styles.modalText, margin: 0 }}>
             {total === 0 && removedCount === 0 && (p.catalogNewEntries ?? 0) === 0
