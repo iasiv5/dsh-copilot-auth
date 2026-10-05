@@ -400,9 +400,10 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
       <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, height: "min(80vh, 680px)", padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "18px 20px 6px" }}>
           <h4 style={styles.modalTitle}>{t("manageModels")}</h4>
-          {/* staleNotice 双语义分流（R1-4）：删除类未消解时用 removalNeedsLive（下方横幅已表达，
-              此处不再叠加误导性的 previewStale）；否则维持「请重新预览并确认」原义 */}
-          {flow.staleNotice && !(removedCount > 0 && p.evidence?.source !== "live") && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
+          {/* staleNotice 双语义分流（R1-4/R2-1）：「可应用的缓存态」（有效缓存＋latest 目录）
+              下一律不显示 previewStale——纯新增可正常应用（删除类的知情由 removalNeedsLive
+              横幅承担）；其余（apply-stale 重预览、stale 证据等）维持「请重新预览并确认」 */}
+          {flow.staleNotice && !(!isStale && p.evidence?.source !== "live" && p.catalogSource === "latest") && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
           <p style={styles.modalText}>{sourceLine}</p>
           {isStale && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
         </div>
@@ -416,7 +417,7 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
             {removalRows.length > 0 && (
               <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, fontSize: 12, ...(locked ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
                 disabled={locked} title={locked ? t("removalNeedsLive") : undefined}
-                onClick={() => emitSel(new Set([...addableIds, ...rows.filter((r) => r.status === "listed").map((r) => r.id), ...lockedIds]))}
+                onClick={() => emitSel(new Set([...addableIds, ...rows.filter((r) => r.status === "listed").map((r) => r.id)]))}
               >{t("alignAction")}</button>
             )}
           </div>
