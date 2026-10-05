@@ -50,28 +50,32 @@ const DICTS = {
     errHttp: "The authorization request failed. Check status and retry.",
     logoutScope: "This removes Copilot authorization from this credential store and affects other instances using it. It does not delete your GitHub account.",
     logoutFailed: "Sign-out did not complete; authorization credentials may remain. Please retry.",
-    // ---- Model management (protocol v2, design §5) ----
-    supplement: "Add models",
-    rebuild: "Rebuild model list",
-    supplementTitle: "Add models",
-    rebuildTitle: "Rebuild model list",
-    candidates: "Models available to add",
+    // ---- Model management (protocol v3, design §5 / ADR 0005) ----
+    manageModels: "Manage model list",
     selectAll: "Select all",
     selectNone: "Deselect all",
-    supplementRisk: "Existing models and customizations will be kept. Only selected models will be added.",
-    rebuildRisk: "Rebuilding clears model parameters and overrides. Other provider settings remain unchanged.",
+    alignAction: "Align with account & catalog",
+    groupAddable: "Available to add",
+    groupListed: "In list",
+    groupRemoval: "Proposed for removal",
+    retain: "Keep: re-check to retain",
+    customizedBadge: "Customized",
+    clearOverrides: "Also clear all model customizations.",
+    inheritedOverrides: "Inherited model customizations cannot be cleared here.",
     clearRisk: "This clears the Copilot model list and its model customizations. Confirm clearing separately.",
     secondConfirm: "This is destructive. Click again to confirm.",
     applyChanges: "Apply changes",
-    addedModels: "Models to add",
-    removedModels: "Models to be removed",
-    keptModels: "Kept",
-    removedAccount: "Not included in this account model list",
+    removalRisk: "{count} listed model(s) will be removed; their customizations are removed with them.",
+    summaryLine: "After applying: {total} model(s) — {kept} kept · {added} added · {removed} removed",
+    catalogNotice: "{count} catalog entries will be added",
+    noChanges: "No changes and no new catalog entries.",
+    removalNeedsLive: "Removals require live account evidence",
+    removedAccount: "Not reported by this account",
     removedUnresolvable: "Not resolvable by the current catalog",
     warnings: "Warnings",
     skippedModels: "Upstream entries skipped by validation",
     srcLive: "Account models: live",
-    srcCache: "Account models: cached at {time}; add-only use",
+    srcCache: "Account models: cached at {time}; removals require upgrading to live evidence",
     srcStale: "The cache has no trusted timestamp, is expired, or belongs to changed authorization; reference only.",
     srcLatest: "Catalog source: latest pi-ai from npm",
     srcLocal: "Catalog source: local (npm fetch failed)",
@@ -138,28 +142,32 @@ const DICTS = {
     errHttp: "授权请求失败。请查询状态后重试。",
     logoutScope: "将清除此凭据库中的 Copilot 授权，使用同一凭据库的其他实例也会受到影响。此操作不注销 GitHub 账号。",
     logoutFailed: "退出登录未完成，授权凭据仍可能存在。请重试。",
-    // ---- 模型管理（协议 v2，设计§5） ----
-    supplement: "补充模型",
-    rebuild: "重建模型列表",
-    supplementTitle: "补充模型",
-    rebuildTitle: "重建模型列表",
-    candidates: "可新增的模型",
+    // ---- 模型管理（协议 v3，设计§5 / ADR 0005） ----
+    manageModels: "管理模型列表",
     selectAll: "全选",
     selectNone: "取消全选",
-    supplementRisk: "将保留现有模型及定制，只添加你勾选的模型。",
-    rebuildRisk: "重建将清除现有模型参数与覆盖配置，其他提供方设置不变。",
+    alignAction: "对齐账号与目录",
+    groupAddable: "可新增",
+    groupListed: "在列",
+    groupRemoval: "待删除候选",
+    retain: "挽留：重新勾选以保留",
+    customizedBadge: "有定制",
+    clearOverrides: "同时清除全部模型定制。",
+    inheritedOverrides: "存在继承的模型定制，无法在此清除。",
     clearRisk: "本次将清空 Copilot 模型列表并清除其模型定制。请单独确认清空。",
     secondConfirm: "此操作具有破坏性，请再次点击确认。",
     applyChanges: "应用更改",
-    addedModels: "将添加的模型",
-    removedModels: "将移除的模型",
-    keptModels: "保留",
-    removedAccount: "未包含在本次账号模型列表",
-    removedUnresolvable: "当前目录无法解析",
+    removalRisk: "将移除 {count} 个在列模型，其定制随之清除。",
+    summaryLine: "应用后共 {total} 个：保留 {kept} · 新增 {added} · 移除 {removed}",
+    catalogNotice: "目录将新增 {count} 条描述",
+    noChanges: "无需更改，目录也无新数据。",
+    removalNeedsLive: "移除类更改需要实时账号证据",
+    removedAccount: "账号未报告",
+    removedUnresolvable: "目录无法解析",
     warnings: "警告",
     skippedModels: "被校验跳过的上游条目",
     srcLive: "账号模型：实时获取",
-    srcCache: "账号模型：缓存，获取于 {time}，仅可用于补充",
+    srcCache: "账号模型：缓存，获取于 {time}；移除类更改需升级为实时证据",
     srcStale: "缓存缺少可信时间、已过期或授权已变化，仅供参考。",
     srcLatest: "目录来源：npm 最新 pi-ai",
     srcLocal: "目录来源：本地目录（npm 拉取失败）",
@@ -313,37 +321,58 @@ function sampleThemeSurface() {
   return { bg, fg: cs.color || "inherit" };
 }
 
-// 模型操作弹窗（协议 v2，T11）：补充（候选勾选，默认全不选）／重建（二次确认，
-// 空目标单独确认）。选择变化经 onSelect → 服务端从原快照 materialize（不重新取数）；
-// stale 证据只展示参考且禁用应用（Q7）；危险确认阶段初始焦点在取消、可取消阶段
-// Esc 等价取消（设计§5）；技术详情默认折叠（G04）。
+// 模型操作弹窗（协议 v3，ADR 0005）：管理模型列表＝目标状态编辑。单张分组全表
+// （可新增/在列/待删除候选），勾选集合即期望终态；选择/清除定制经 onSelect → 服务端
+// 从原快照 materialize（不重新取数）；缓存证据＋删除提案由状态机自动升级 live；
+// 删除类变更二次确认、空目标单独确认、降级来源锁定待删除候选（Q33/Q35/Q36）；
+// 危险确认初始焦点在取消、Esc 等价取消（设计§5）；技术详情默认折叠（G04）。
 function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
   const p = flow.preview;
-  const diff = p.diff ?? {};
-  const isRebuild = p.operation === "rebuild";
-  const emptyTarget = isRebuild && (diff.targetView?.models ?? []).length === 0;
-  const candidates = diff.candidates ?? [];
+  const isStale = p.evidence?.stale === true;
+  const degradedCatalog = p.catalogSource === "local" || p.catalogSource === "overlay";
+  const locked = isStale || degradedCatalog; // 降级来源：待删除候选锁定保留（Q33）
+  const rows = p.rows ?? [];
+  const addableIds = rows.filter((r) => r.status === "addable").map((r) => r.id);
+  const rawAllIds = rows.filter((r) => r.status !== "addable").map((r) => r.id);
+  const removalRows = rows.filter((r) => r.status === "removal-proposal");
   // 乐观勾选：点击即更新本地视图，服务端 materialize 回显到达后清空覆盖
   const [localSel, setLocalSel] = useState(null); // Set | null
-  useEffect(() => { setLocalSel(null); }, [p.diff]);
-  const selectedIds = new Set(localSel ?? (diff.added ?? []));
-  const emitSel = (ids) => { setLocalSel(new Set(ids)); onSelect(ids); };
+  const [coChecked, setCoChecked] = useState(false);
+  useEffect(() => { setLocalSel(null); setCoChecked(p.clearOverrides === true); }, [p.diff]);
+  const selected = localSel ?? new Set(p.diff?.selectedIds ?? []);
+  const confirmEmptyOf = (set) => set.size === 0 && p.hadModels === true;
+  const emitSel = (nextSet) => {
+    setLocalSel(nextSet);
+    onSelect({ selectedIds: [...nextSet], clearOverrides: coChecked, confirmEmpty: confirmEmptyOf(nextSet) });
+  };
+  const toggle = (id) => {
+    const next = new Set(selected);
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    emitSel(next);
+  };
+  const toggleClearOverrides = (v) => {
+    setCoChecked(v);
+    onSelect({ selectedIds: [...selected], clearOverrides: v, confirmEmpty: confirmEmptyOf(selected) });
+  };
+  // 摘要/风险计数与勾选态同源（勾选即终态，无需等服务端回显）
+  const keptCount = rawAllIds.filter((id) => selected.has(id)).length;
+  const addedCount = addableIds.filter((id) => selected.has(id)).length;
+  const removedCount = rawAllIds.length - keptCount;
+  const total = keptCount + addedCount;
+  const emptyTarget = confirmEmptyOf(selected);
+  const needsEscalate = removedCount > 0 || coChecked || emptyTarget;
+  const applyBlocked = isStale || (removedCount > 0 && (p.evidence?.source !== "live" || degradedCatalog));
   const [stage, setStage] = useState(0); // 0 常规｜1 已警示待二次确认｜2 已警示待清空确认
   const cancelRef = useRef(null);
   const surface = useRef(null);
   if (!surface.current) surface.current = sampleThemeSurface();
-  useEffect(() => {
-    setStage(0); // 预览/选择变化重置确认（设计§4.2：漂移必再确认）
-  }, [p.previewId]);
-  useEffect(() => {
-    if (stage > 0) cancelRef.current?.focus(); // 危险确认初始焦点在取消（设计§5）
-  }, [stage]);
-  const escCancel = (e) => {
-    if (e.key === "Escape") onCancel(); // 可取消阶段 Esc 等价取消
-  };
+  useEffect(() => { setStage(0); }, [p.previewId]); // 预览/选择变化重置确认（漂移必再确认）
+  useEffect(() => { if (stage > 0) cancelRef.current?.focus(); }, [stage]);
+  const escCancel = (e) => { if (e.key === "Escape") onCancel(); };
   const confirmClick = () => {
-    if (p.evidence?.stale === true) return; // reducer 双保险
-    if (!isRebuild) { onConfirm({ second: false, empty: false }); return; }
+    if (isStale || applyBlocked) return; // reducer 双保险
+    if (!needsEscalate) { onConfirm({ second: false, empty: false }); return; }
     if (stage === 0) { setStage(1); return; }
     if (emptyTarget && stage === 1) { setStage(2); return; }
     onConfirm({ second: true, empty: emptyTarget });
@@ -353,88 +382,105 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
       : p.evidence?.source === "cache" ? t("srcCache").replace("{time}", String(p.evidence?.fetchedAt ?? "")) : null,
     p.catalogSource === "latest" ? t("srcLatest") : p.catalogSource === "overlay" ? t("srcOverlay") : t("srcLocal"),
   ].filter(Boolean).join(" · ");
-  const list = (items, style, render) =>
-    items.length === 0 ? <span style={{ opacity: 0.6 }}>{t("none")}</span> : (
-      <ul style={styles.diffList}>
-        {items.map((x, i) => <li key={x?.id ?? x ?? i} style={{ ...style, ...styles.mono }}>{render ? render(x) : x}</li>)}
-      </ul>
-    );
+  const groupDefs = [
+    { key: "groupAddable", items: rows.filter((r) => r.status === "addable") },
+    { key: "groupListed", items: rows.filter((r) => r.status === "listed") },
+    { key: "groupRemoval", items: removalRows, retain: true },
+  ];
   return (
     <div style={styles.modalMask} role="dialog" aria-modal="true" onKeyDown={escCancel}>
-      {/* 固定高度＋三段式（头部/可滚动内容/常驻操作栏）：勾选与物化往返不再
-          改变卡片尺寸——主人 2026-10-05 反馈的「卡片变大缩小闪眼睛」修复 */}
+      {/* 固定高度＋三段式（头部/可滚动内容/常驻操作栏）：勾选与物化往返不改变卡片尺寸 */}
       <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, height: "min(80vh, 680px)", padding: 0, overflow: "hidden" }}>
-        {/* 物化期间不渲染任何指示（v1.2.16）：勾选为乐观即时反馈、物化通常亚秒
-            完成，任何显隐指示都会构成闪烁；物化中误点「应用更改」由状态机安全
-            忽略（materializing 时不接受 confirm，防旧 previewId 提交） */}
         <div style={{ padding: "18px 20px 6px" }}>
-          <h4 style={styles.modalTitle}>{t(isRebuild ? "rebuildTitle" : "supplementTitle")}</h4>
+          <h4 style={styles.modalTitle}>{t("manageModels")}</h4>
           {flow.staleNotice && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
           <p style={styles.modalText}>{sourceLine}</p>
-          {p.evidence?.stale === true && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
+          {isStale && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
         </div>
         <div style={{ flex: 1, overflowY: "auto", minHeight: 0, scrollbarGutter: "stable", padding: "0 20px" }}>
-        {!isRebuild && (
-          <>
-            <p style={styles.modalText}>
-              <strong>{t("candidates")}</strong>（{candidates.length}）
-              {candidates.length > 0 && (() => {
-                // 全选/取消全选互斥切换：全选中→取消全选；有任一未勾选（含部分勾选）→全选
-                const allSelected = candidates.every((id) => selectedIds.has(id));
+          {/* 工具行：全选/取消全选作用于全表（含待删除候选＝全部挽留）；对齐仅在漂移时出现（Q36） */}
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", padding: "6px 0" }}>
+            <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, fontSize: 12 }}
+              onClick={() => emitSel(new Set([...addableIds, ...rawAllIds]))}>{t("selectAll")}</button>
+            <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, fontSize: 12 }}
+              onClick={() => emitSel(new Set())}>{t("selectNone")}</button>
+            {removalRows.length > 0 && (
+              <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, fontSize: 12, ...(locked ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+                disabled={locked} title={locked ? t("removalNeedsLive") : undefined}
+                onClick={() => emitSel(new Set([...addableIds, ...rows.filter((r) => r.status === "listed").map((r) => r.id)]))}
+              >{t("alignAction")}</button>
+            )}
+          </div>
+          {groupDefs.map(({ key, items, retain }) => items.length === 0 ? null : (
+            <div key={key} style={{ marginBottom: 8 }}>
+              <p style={{ ...styles.modalText, fontWeight: 600, margin: "6px 0 2px" }} title={retain ? t("retain") : undefined}>
+                {t(key)}（{items.length}）
+              </p>
+              {items.map((r) => {
+                const forceKept = r.status === "removal-proposal" && locked;
+                const checked = forceKept || selected.has(r.id);
                 return (
-                  <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, marginLeft: 10, fontSize: 12 }} onClick={() => emitSel(allSelected ? [] : candidates)}>
-                    {allSelected ? t("selectNone") : t("selectAll")}
-                  </button>
+                  <label key={r.id} style={{ display: "flex", gap: 8, alignItems: "center", padding: "2px 0" }}>
+                    <input type="checkbox" checked={checked} disabled={forceKept} onChange={() => toggle(r.id)} />
+                    <span style={styles.mono}>{r.id}</span>
+                    {r.status === "removal-proposal" && (
+                      <span style={{ ...styles.removed, fontSize: 12 }}>{t(r.reason === "unresolvable" ? "removedUnresolvable" : "removedAccount")}</span>
+                    )}
+                    {r.customized === true && <span style={{ ...styles.muted, fontSize: 12 }}>{t("customizedBadge")}</span>}
+                  </label>
                 );
-              })()}
-            </p>
-            {list(candidates, styles.added, (id) => (
+              })}
+            </div>
+          ))}
+          {(p.overridesMeta?.clearable || p.overridesMeta?.inheritedOnly) && (
+            <div style={{ padding: "4px 0" }}>
               <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input type="checkbox" checked={selectedIds.has(id)} onChange={() => {
-                  const next = new Set(selectedIds);
-                  if (next.has(id)) next.delete(id);
-                  else next.add(id);
-                  emitSel([...next]);
-                }} />
-                <span>{id}</span>
+                <input type="checkbox" checked={coChecked} disabled={!p.overridesMeta?.clearable} onChange={(e) => toggleClearOverrides(e.target.checked)} />
+                <span style={p.overridesMeta?.clearable ? undefined : { ...styles.muted, fontSize: 13 }}>
+                  {t(p.overridesMeta?.clearable ? "clearOverrides" : "inheritedOverrides")}
+                </span>
               </label>
-            ))}
-            <p style={styles.risk}>⚠ {t("supplementRisk")}</p>
-          </>
-        )}
-        <p style={styles.modalText}><strong>{t("addedModels")}</strong>（{(diff.added ?? []).length}）</p>
-        {list(diff.added ?? [], styles.added)}
-        <p style={styles.modalText}><strong>{t("removedModels")}</strong>（{(diff.removed ?? []).length}）</p>
-        {list(diff.removed ?? [], styles.removed, (x) => `${x.id} — ${t(x.reason === "unresolvable" ? "removedUnresolvable" : "removedAccount")}`)}
-        <p style={styles.modalText}><strong>{t("keptModels")}</strong>（{(diff.kept ?? []).length}）</p>
-        {/* 保留清单（v1.2.17）：弱化色＝不变的部分，与增（亮绿）/删（红）区分；
-            让预览成为「应用后完整终态」的可审计视图（重建场景尤甚） */}
-        {list(diff.kept ?? [], styles.muted)}
-        {(diff.warnings ?? []).length > 0 && (
-          <>
-            <p style={styles.modalText}><strong>{t("warnings")}</strong>（{diff.warnings.length}）</p>
-            {list(diff.warnings, styles.skipped, (w) => `${w.id ?? ""} — ${w.reason ?? ""}`)}
-          </>
-        )}
-        {isRebuild && <p style={styles.risk}>⚠ {t("rebuildRisk")}</p>}
-        {emptyTarget && stage >= 1 && <p style={styles.risk}>⚠ {t("clearRisk")}</p>}
-        {stage === 1 && !emptyTarget && <p style={styles.risk}>⚠ {t("secondConfirm")}</p>}
-        {(p.skipped ?? []).length > 0 && (
-          <details style={styles.modalText}>
-            <summary>{t("skippedModels")}（{p.skipped.length}）</summary>
-            <ul style={styles.diffList}>
-              {p.skipped.map((s) => <li key={s.id} style={styles.skipped}>{s.id} — {s.reason}</li>)}
-            </ul>
-          </details>
-        )}
-        {p.catalogError && (
-          <details style={styles.modalText}>
-            <summary>{t("techDetails")}</summary>
-            <span style={{ ...styles.mono, fontSize: 12 }}>{p.catalogError}</span>
-          </details>
-        )}
+            </div>
+          )}
+          {stage >= 1 && removedCount > 0 && <p style={styles.risk}>⚠ {t("removalRisk").replace("{count}", String(removedCount))}</p>}
+          {stage >= 1 && coChecked && <p style={styles.risk}>⚠ {t("clearOverrides")}</p>}
+          {stage >= 1 && removedCount === 0 && <p style={styles.risk}>⚠ {t("secondConfirm")}</p>}
+          {emptyTarget && stage >= 2 && <p style={styles.risk}>⚠ {t("clearRisk")}</p>}
+          {(p.skipped ?? []).length > 0 && (
+            <details style={styles.modalText}>
+              <summary>{t("skippedModels")}（{p.skipped.length}）</summary>
+              <ul style={styles.diffList}>
+                {p.skipped.map((s) => <li key={s.id} style={styles.skipped}>{s.id} — {s.reason}</li>)}
+              </ul>
+            </details>
+          )}
+          {((p.diff?.warnings ?? []).length > 0 || p.catalogError) && (
+            <details style={styles.modalText}>
+              <summary>{t("techDetails")}</summary>
+              {(p.diff?.warnings ?? []).length > 0 && (
+                <ul style={styles.diffList}>
+                  {(p.diff?.warnings ?? []).map((w, i) => <li key={w.id ?? i} style={styles.skipped}>{w.id} — {w.reason}</li>)}
+                </ul>
+              )}
+              {p.catalogError && <span style={{ ...styles.mono, fontSize: 12 }}>{p.catalogError}</span>}
+            </details>
+          )}
         </div>
         <div style={{ padding: "8px 20px 16px" }}>
+          {/* 摘要行常驻：知情（Q36）；与风险线同源计数 */}
+          <p style={{ ...styles.modalText, margin: 0 }}>
+            {total === 0 && removedCount === 0 && (p.catalogNewEntries ?? 0) === 0
+              ? t("noChanges")
+              : <>
+                  {t("summaryLine")
+                    .replace("{total}", String(total))
+                    .replace("{kept}", String(keptCount))
+                    .replace("{added}", String(addedCount))
+                    .replace("{removed}", String(removedCount))}
+                  {(p.catalogNewEntries ?? 0) > 0 && <> · {t("catalogNotice").replace("{count}", String(p.catalogNewEntries))}</>}
+                </>}
+          </p>
+          {removedCount > 0 && applyBlocked && <p style={styles.banner}>⚠ {t("removalNeedsLive")}</p>}
           <div style={styles.modalActions}>
             {p.catalogSource === "local" && (
               <button type="button" style={{ ...styles.button, ...styles.secondary, marginRight: "auto" }} onClick={onOverlay}>
@@ -444,8 +490,8 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
             <button ref={cancelRef} type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
             <button
               type="button"
-              style={{ ...styles.button, ...styles.primary, ...((p.evidence?.stale === true) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-              disabled={p.evidence?.stale === true}
+              style={{ ...styles.button, ...styles.primary, ...(applyBlocked ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+              disabled={applyBlocked}
               onClick={confirmClick}
             >
               {t("applyChanges")}
@@ -685,24 +731,14 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
                 {flow.name === "applying" ? t("applying") : t("refreshing")}
               </button>
             ) : (
-              <>
-                <button
-                  type="button"
-                  style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(flow.flags) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-                  disabled={refreshBlocked(flow.flags)}
-                  onClick={() => drive({ type: "start", operation: "supplement" })}
-                >
-                  {t("supplement")}
-                </button>
-                <button
-                  type="button"
-                  style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(flow.flags) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
-                  disabled={refreshBlocked(flow.flags)}
-                  onClick={() => drive({ type: "start", operation: "rebuild" })}
-                >
-                  {t("rebuild")}
-                </button>
-              </>
+              <button
+                type="button"
+                style={{ ...styles.button, ...styles.primary, ...(refreshBlocked(flow.flags) ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
+                disabled={refreshBlocked(flow.flags)}
+                onClick={() => drive({ type: "start", operation: "manage" })}
+              >
+                {t("manageModels")}
+              </button>
             )}
           </div>
           {auth.logoutError && (
@@ -771,7 +807,7 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
         <RefreshModal
           t={t}
           flow={flow}
-          onSelect={(selectedIds) => drive({ type: "select", selectedIds })}
+          onSelect={({ selectedIds, clearOverrides, confirmEmpty }) => drive({ type: "select", selectedIds, clearOverrides, confirmEmpty })}
           onConfirm={(opts) => drive({ type: "confirm", ...opts })}
           onCancel={() => drive({ type: "cancel" })}
           onOverlay={() => drive({ type: "start", catalogSource: "overlay" })}
