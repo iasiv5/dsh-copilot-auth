@@ -193,7 +193,7 @@ D-01曾采用软撤回（Q38 修订 2026-10-05：入口与 /cancel 路由已移�
 | removalRisk | 将移除 {count} 个在列模型，其定制随之清除。 | {count} listed models will be removed; their customizations are removed with them. |
 | clearOverrides | 同时清除全部模型定制。 | Also clear all model customizations. |
 | inheritedOverrides | 存在继承的模型定制，无法在此清除。 | Inherited model customizations cannot be cleared here. |
-| clearRisk | 本次将清空 Copilot 模型列表并清除其模型定制。 | This clears the Copilot model list and its model customizations. |
+| clearRisk | 清空不会隐藏模型——会话内将显示全部可用模型；要精简，只需勾选保留项。 | Clearing hides nothing — all available models stay listed; to trim, keep only the ones you check. |
 | removed.account | 账号未报告 | Not reported by this account |
 | removed.unresolvable | 目录无法解析 | Not resolvable by the current catalog |
 | retain | 挽留：重新勾选以保留 | Keep: re-check to retain |
