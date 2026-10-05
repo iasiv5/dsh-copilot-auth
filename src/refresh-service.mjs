@@ -26,8 +26,9 @@ function flowError(code, message, extra = {}) {
 const iso = (ts) => new Date(ts).toISOString();
 
 // 账号证据：live GET 成功才写缓存（fetchedAt＋intentVersion）；缓存仅 ≤24h 且同
-// intentVersion 时可作补充的应用依据；否则 stale——预览可展示参考，apply 被拒（Q7/Q16）。
-// 重建（rebuild）永不使用缓存：live 失败即 evidence-unavailable，不退化为缓存重建。
+// intentVersion 时可作纯新增的应用依据；否则 stale——预览可展示参考，apply 被拒（Q7/Q16）。
+// 移除类变更（removed>0）在 apply 时强制 live 证据＋latest 目录（removals-need-live，Q35/R2）；
+// live 拉取失败回退有效缓存属软降级，由 client 端升级/禁用逻辑兜底（R4-3），服务端门最终兜底。
 async function resolveAccountEvidence(ctx, { scope, readIntentVersion, clock, fetchImpl }) {
   const iv = readIntentVersion();
   const cacheFile = join(scope.dataDir, "account-model-cache.json");
@@ -83,20 +84,26 @@ export function createRefreshService(ctx, {
     }
   }
 
-  function diffFromInputs({ operation, evidence, catalog, config, selectedIds, confirmEmpty }) {
+  function diffFromInputs({ operation, evidence, catalog, config, selectedIds, confirmEmpty, clearOverrides }) {
     const diff = buildModelChange({
       operation,
       rawView: config.view,
       effectiveView: config.effectiveView,
       accountIds: evidence.ids,
       resolvableIds: catalog.resolvableIds,
-      selectedIds: selectedIds ?? [],
+      selectedIds, // undefined → 服务端默认（在列∩(账号∩可解析)）；显式 [] → 用户空目标意图
+      clearOverrides: clearOverrides === true,
       confirmEmpty: confirmEmpty === true,
       catalogNewEntryCount: catalog.newEntryCount ?? 0,
     });
     if (!diff.allowed) throw flowError(diff.reason, diff.reason, { policy: diff.reason, warnings: diff.warnings });
     return diff;
   }
+
+  const hadModelsOf = (config) => {
+    const models = config?.view?.modelsPresent && Array.isArray(config.view.models) ? config.view.models : [];
+    return models.some((m) => typeof m?.id === "string");
+  };
 
   async function preview(body = {}) {
     requireScope();
@@ -106,8 +113,8 @@ export function createRefreshService(ctx, {
     for (const [id, snap] of snapshots) {
       if (nowTs > snap.expiresAt) snapshots.delete(id);
     }
-    const { operation, catalogSource, basePreviewId, selectedIds, confirmEmpty } = body;
-    if (operation !== "supplement" && operation !== "rebuild") {
+    const { operation, catalogSource, basePreviewId, selectedIds, confirmEmpty, clearOverrides } = body;
+    if (operation !== "manage") {
       throw flowError("INVALID_OPERATION", "invalid-operation");
     }
     // 选择变化：从原快照重算（不重新下载、不重新取数），沿用原 expiresAt
@@ -117,13 +124,14 @@ export function createRefreshService(ctx, {
       if (clock.now() > base.expiresAt) throw flowError("PREVIEW_INVALID", "preview-invalid", { reason: "expired" });
       const diff = diffFromInputs({
         operation: base.operation, evidence: base.evidence, catalog: base.catalog,
-        config: base.config, selectedIds, confirmEmpty,
+        config: base.config, selectedIds, confirmEmpty, clearOverrides,
       });
       const snap = {
         ...base,
         previewId: randomUUID(),
         selectedIds: [...(selectedIds ?? [])],
         confirmEmpty: confirmEmpty === true,
+        clearOverrides: clearOverrides === true,
         diff,
         operationId: randomUUID(),
         basePreviewId,
@@ -133,13 +141,10 @@ export function createRefreshService(ctx, {
       return projectPreview(snap);
     }
     const evidence = await resolveAccountEvidence(ctx, { scope, readIntentVersion, clock, fetchImpl: getFetch() });
-    if (operation === "rebuild" && evidence.source !== "live") {
-      throw flowError("EVIDENCE_UNAVAILABLE", "rebuild requires a live account fetch; cache is never used for rebuild");
-    }
     const catalog = await resolveCatalog(catalogSource);
     const config = await describeConfigView();
     const intentVersion = readIntentVersion();
-    const diff = diffFromInputs({ operation, evidence, catalog, config, selectedIds, confirmEmpty });
+    const diff = diffFromInputs({ operation, evidence, catalog, config, selectedIds, confirmEmpty, clearOverrides });
     const now = clock.now();
     const snap = {
       previewId: randomUUID(),
@@ -148,6 +153,8 @@ export function createRefreshService(ctx, {
       operation,
       selectedIds: [...(selectedIds ?? [])],
       confirmEmpty: confirmEmpty === true,
+      clearOverrides: clearOverrides === true,
+      hadModels: hadModelsOf(config),
       evidence,
       catalog,
       config,
@@ -172,9 +179,14 @@ export function createRefreshService(ctx, {
       catalogError: snap.catalog.catalogError ?? null,
       skipped: snap.catalog.skipped ?? [],
       normalized: snap.catalog.normalized ?? null,
+      hadModels: snap.hadModels === true,
+      clearOverrides: snap.clearOverrides === true,
+      catalogNewEntries: snap.catalog.newEntryCount ?? 0,
+      overridesMeta: snap.diff.overridesMeta,
+      rows: snap.diff.rows,
       diff: {
         targetView: snap.diff.targetView,
-        candidates: snap.diff.candidates ?? null,
+        selectedIds: snap.diff.selectedIds,
         added: snap.diff.added,
         removed: snap.diff.removed,
         kept: snap.diff.kept,
@@ -219,6 +231,9 @@ export function createRefreshService(ctx, {
       }
       if (snap.evidence.stale) {
         throw flowError("EVIDENCE_STALE", "account evidence is stale (no trusted timestamp, expired, or auth changed); live fetch required");
+      }
+      if ((snap.diff.removed ?? []).length > 0 && (snap.evidence.source !== "live" || snap.catalog.catalogSource !== "latest")) {
+        throw flowError("removals-need-live", "removals-need-live");
       }
       if (!transaction) throw flowError("DEPS_MISSING", "transaction kernel not wired");
       snap.consumed = true;

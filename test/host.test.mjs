@@ -417,10 +417,10 @@ const post = (ctx, suffix, body) => call(handler(ctx, suffix), { method: "POST",
 
 test("REFRESH_V2_协议门禁：缺 protocolVersion → 400 upgrade-required；未知 catalogSource → 400", async () => {
   const ctx = makeRefreshCtx();
-  const noProto = await post(ctx, "/refresh/preview", { operation: "supplement" });
+  const noProto = await post(ctx, "/refresh/preview", { operation: "manage" });
   assert.equal(noProto.code, 400);
   assert.equal(noProto.body.error, "upgrade-required");
-  const badSource = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", catalogSource: "bogus" });
+  const badSource = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", catalogSource: "bogus" });
   assert.equal(badSource.code, 400);
   assert.equal(badSource.body.error, "invalid-catalog-source");
   const badOp = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "mirror" });
@@ -428,21 +428,29 @@ test("REFRESH_V2_协议门禁：缺 protocolVersion → 400 upgrade-required；�
   assert.equal(badOp.body.error, "invalid-operation");
 });
 
-test("REFRESH_V2_preview live：证据/来源/差异/跳过项就位，候选默认不勾选", async () => {
+test("REFRESH_V3_preview live：证据/来源/差异/rows/新投影字段就位；默认选择＝健康在列", async () => {
   const ctx = makeRefreshCtx();
-  const res = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: [] });
+  const res = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage" });
   assert.equal(res.code, 200);
   const b = res.body;
   assert.equal(b.evidence.source, "live");
   assert.equal(b.catalogSource, "latest");
-  assert.deepEqual(b.diff.added, [], "未勾选零追加");
+  assert.deepEqual(b.diff.selectedIds, ["gpt-a"], "默认目标＝在列∩(账号∩可解析)");
+  assert.deepEqual(b.diff.added, [], "默认零追加");
+  assert.deepEqual(b.diff.removed, []);
   assert.ok(b.operationId && b.previewId && b.expiresAt);
   assert.deepEqual(b.diff.writeSet, { catalogEntries: true, models: false, modelOverrides: false, overridesUnclearable: false });
+  assert.deepEqual(b.rows.map((r) => [r.id, r.status]), [["gpt-b", "addable"], ["gpt-a", "listed"]], "rows 三态就位");
+  assert.equal(b.hadModels, true);
+  assert.deepEqual(b.overridesMeta, { rawPresent: false, clearable: false, inheritedOnly: false });
+  assert.equal(b.catalogNewEntries, 1);
+  assert.equal(b.clearOverrides, false);
+  assert.equal("candidates" in b.diff, false, "v3 投影不再有 candidates");
 });
 
 test("REFRESH_V2_apply file 通道：当次零 settings 写、pending-restart、目录落地；boot 后 applied", async () => {
   const ctx = makeRefreshCtx({ applyOps: true });
-  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: ["gpt-a", "gpt-b"] });
   const ap = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(ap.code, 200);
   assert.equal(ap.body.result.status, "pending-restart");
@@ -472,7 +480,7 @@ test("REFRESH_V2_apply file 通道：当次零 settings 写、pending-restart、
 
 test("REFRESH_V2_幂等：同 operationId 重复 apply 返回已知结果且不重复执行", async () => {
   const ctx = makeRefreshCtx({ applyOps: true });
-  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: ["gpt-b"] });
   const first = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(first.body.result.status, "pending-restart");
   const again = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
@@ -483,9 +491,9 @@ test("REFRESH_V2_幂等：同 operationId 重复 apply 返回已知结果且不�
 
 test("REFRESH_V2_忙与 retire：activeOperation 未终结时新 apply 423；retire 闭环后放行", async () => {
   const ctx = makeRefreshCtx({ applyOps: true });
-  const pv1 = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const pv1 = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: ["gpt-b"] });
   await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv1.body.previewId, operationId: pv1.body.operationId });
-  const pv2 = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: [] });
+  const pv2 = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage" });
   const busy = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv2.body.previewId, operationId: pv2.body.operationId });
   assert.equal(busy.code, 423);
   assert.equal(busy.body.error, "resource-busy");
@@ -498,7 +506,7 @@ test("REFRESH_V2_忙与 retire：activeOperation 未终结时新 apply 423；ret
 
 test("REFRESH_V2_status 三态：active／last／unknown；字段齐备且 GET 不写探针", async () => {
   const ctx = makeRefreshCtx({ applyOps: true });
-  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: ["gpt-b"] });
   const ap = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(ap.body.result.status, "pending-restart");
   const active = await call(handler(ctx, "/status"), { url: `/copilot-auth/status?operationId=${pv.body.operationId}` });
@@ -540,7 +548,7 @@ test("REFRESH_V2_registry 通道：只读安装树 apply 当次注入＋提交�
     injectRegistry: async () => ({ ok: true, injected: ["gpt-b"], present: [], via: "bare" }),
     fetchImpl: fetchImplFor({ live: "ok", npm: "ok", latestCatalog: latestWithGptb(), modelsData: [pickerOn("gpt-a"), pickerOn("gpt-b")] }),
   });
-  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "supplement", selectedIds: ["gpt-b"] });
+  const pv = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: ["gpt-b"] });
   const ap = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: pv.body.previewId, operationId: pv.body.operationId });
   assert.equal(ap.code, 200);
   assert.equal(ap.body.result.status, "applied");
@@ -550,7 +558,7 @@ test("REFRESH_V2_registry 通道：只读安装树 apply 当次注入＋提交�
   assert.equal(status.body.refresh.pendingRestart, false);
 });
 
-test("REFRESH_V2_rebuild：空交集未单独确认 → 409；确认后允许清空", async () => {
+test("REFRESH_V3_空目标：默认空选择（全漂移）放行；显式 [] 未确认 → 409；确认后落显式空列表", async () => {
   const ctx = makeCtx({
     record: { "llm-pi-ai/github-copilot": { kind: "grant", payload: { access: INDIVIDUAL_TOKEN } } },
     userLayer: { providers: { "github-copilot": { models: [{ id: "gpt-a" }] } } },
@@ -558,11 +566,15 @@ test("REFRESH_V2_rebuild：空交集未单独确认 → 409；确认后允许清
     catalogFile: makeInstall().catalogFile,
     fetchImpl: fetchImplFor({ live: "ok", modelsData: [] }), // 账号权威空集合；npm 失败回 local
   });
-  const denied = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "rebuild" });
+  const drift = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage" });
+  assert.equal(drift.code, 200, "默认空选择（全漂移）放行，弹窗必须能打开（M01）");
+  assert.deepEqual(drift.body.diff.removed, [{ id: "gpt-a", reason: "not-in-account" }]);
+  const denied = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: [] });
   assert.equal(denied.code, 409);
-  assert.equal(denied.body.error, "empty-intersection-unconfirmed");
-  const ok = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "rebuild", confirmEmpty: true });
+  assert.equal(denied.body.error, "empty-target-unconfirmed");
+  const ok = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: [], confirmEmpty: true });
   assert.equal(ok.code, 200);
+  assert.equal(ok.body.diff.targetView.modelsPresent, true, "显式空列表＝已配置（防首次填充回填）");
   assert.deepEqual(ok.body.diff.targetView.models, []);
 });
 
