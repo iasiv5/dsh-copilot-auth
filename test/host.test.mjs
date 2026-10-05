@@ -569,6 +569,9 @@ test("REFRESH_V3_空目标：默认空选择（全漂移）放行；显式 [] �
   const drift = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage" });
   assert.equal(drift.code, 200, "默认空选择（全漂移）放行，弹窗必须能打开（M01）");
   assert.deepEqual(drift.body.diff.removed, [{ id: "gpt-a", reason: "not-in-account" }]);
+  const gated = await post(ctx, "/refresh/apply", { protocolVersion: PROTOCOL_VERSION, previewId: drift.body.previewId, operationId: drift.body.operationId });
+  assert.equal(gated.code, 409);
+  assert.equal(gated.body.error, "removals-need-live", "移除类变更在 local 目录下被 apply 门拒绝（路由级 409 兜底）");
   const denied = await post(ctx, "/refresh/preview", { protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: [] });
   assert.equal(denied.code, 409);
   assert.equal(denied.body.error, "empty-target-unconfirmed");

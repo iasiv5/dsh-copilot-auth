@@ -164,6 +164,14 @@ test("materialize：新 previewId、沿用原 expiresAt、clearOverrides 回显"
   const p3 = await h.service.preview({ operation: "manage", basePreviewId: p2.previewId, selectedIds: ["keep-1"], clearOverrides: true });
   assert.equal(p3.clearOverrides, true);
   assert.deepEqual(p3.diff.selectedIds, ["keep-1"]);
+  // 空目标 materialize 路径（计划 T3 用例 2/4 的 basePreviewId 组合）：显式 [] 未确认拒；确认落显式空列表
+  assert.equal(
+    await errCode(h.service.preview({ operation: "manage", basePreviewId: p3.previewId, selectedIds: [] })),
+    "empty-target-unconfirmed",
+  );
+  const p5 = await h.service.preview({ operation: "manage", basePreviewId: p3.previewId, selectedIds: [], confirmEmpty: true });
+  assert.equal(p5.diff.targetView.modelsPresent, true, "materialize 路径同样落显式空列表（防首次填充回填）");
+  assert.deepEqual(p5.diff.targetView.models, []);
 });
 
 test("旧操作字面量：supplement/rebuild → INVALID_OPERATION", async () => {

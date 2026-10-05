@@ -38,8 +38,6 @@ export function buildModelChange({
   const rawIds = rawModels.map((m) => m?.id).filter((x) => typeof x === "string");
   const rawIdSet = new Set(rawIds);
   const accountSet = new Set(accounts);
-  const effModels = eff.modelsPresent && Array.isArray(eff.models) ? eff.models : [];
-  void effModels;
 
   const overridesKeys = raw.modelOverridesPresent && raw.modelOverrides && typeof raw.modelOverrides === "object"
     ? Object.keys(raw.modelOverrides) : [];
@@ -69,6 +67,7 @@ export function buildModelChange({
     ? [...new Set((Array.isArray(selectedIds) ? selectedIds : []).filter((x) => typeof x === "string"))]
     : rawIds.filter((id) => inUniverse(id));
   const selectedSet = new Set(requested);
+  // warnings：manage 语义下只产 invalid-selection/unresolvable（already-configured 仅保留在契约枚举中，不可达）
   const warnings = [];
   for (const id of requested) {
     if (addableSet.has(id) || rawIdSet.has(id)) continue;

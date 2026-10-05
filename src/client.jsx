@@ -72,7 +72,6 @@ const DICTS = {
     removalNeedsLive: "Removals require live account evidence",
     removedAccount: "Not reported by this account",
     removedUnresolvable: "Not resolvable by the current catalog",
-    warnings: "Warnings",
     skippedModels: "Upstream entries skipped by validation",
     srcLive: "Account models: live",
     srcCache: "Account models: cached at {time}; removals require upgrading to live evidence",
@@ -164,7 +163,6 @@ const DICTS = {
     removalNeedsLive: "移除类更改需要实时账号证据",
     removedAccount: "账号未报告",
     removedUnresolvable: "目录无法解析",
-    warnings: "警告",
     skippedModels: "被校验跳过的上游条目",
     srcLive: "账号模型：实时获取",
     srcCache: "账号模型：缓存，获取于 {time}；移除类更改需升级为实时证据",
@@ -335,15 +333,23 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
   const addableIds = rows.filter((r) => r.status === "addable").map((r) => r.id);
   const rawAllIds = rows.filter((r) => r.status !== "addable").map((r) => r.id);
   const removalRows = rows.filter((r) => r.status === "removal-proposal");
-  // 乐观勾选：点击即更新本地视图，服务端 materialize 回显到达后清空覆盖
+  // 乐观勾选：点击即更新本地视图，服务端 materialize 回显到达后清空覆盖。
+  // 锁定降级下待删除候选＝强制保留（Q33）：勾选集合并入锁定行，计数/摘要/上报与勾选框同口径
   const [localSel, setLocalSel] = useState(null); // Set | null
   const [coChecked, setCoChecked] = useState(false);
   useEffect(() => { setLocalSel(null); setCoChecked(p.clearOverrides === true); }, [p.diff]);
-  const selected = localSel ?? new Set(p.diff?.selectedIds ?? []);
+  const lockedIds = rows.filter((r) => r.status === "removal-proposal" && locked).map((r) => r.id);
+  const selected = (() => {
+    const s = new Set(localSel ?? (p.diff?.selectedIds ?? []));
+    for (const id of lockedIds) s.add(id);
+    return s;
+  })();
   const confirmEmptyOf = (set) => set.size === 0 && p.hadModels === true;
   const emitSel = (nextSet) => {
     setLocalSel(nextSet);
-    onSelect({ selectedIds: [...nextSet], clearOverrides: coChecked, confirmEmpty: confirmEmptyOf(nextSet) });
+    const ce = confirmEmptyOf(nextSet);
+    // 非空选择不携带 confirmEmpty（计划 T4 用例 6 字面；服务端 === true 归一，语义一致）
+    onSelect({ selectedIds: [...nextSet], clearOverrides: coChecked, ...(ce ? { confirmEmpty: true } : {}) });
   };
   const toggle = (id) => {
     const next = new Set(selected);
@@ -353,7 +359,8 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
   };
   const toggleClearOverrides = (v) => {
     setCoChecked(v);
-    onSelect({ selectedIds: [...selected], clearOverrides: v, confirmEmpty: confirmEmptyOf(selected) });
+    const ce = confirmEmptyOf(selected);
+    onSelect({ selectedIds: [...selected], clearOverrides: v, ...(ce ? { confirmEmpty: true } : {}) });
   };
   // 摘要/风险计数与勾选态同源（勾选即终态，无需等服务端回显）
   const keptCount = rawAllIds.filter((id) => selected.has(id)).length;
@@ -393,7 +400,9 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
       <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, height: "min(80vh, 680px)", padding: 0, overflow: "hidden" }}>
         <div style={{ padding: "18px 20px 6px" }}>
           <h4 style={styles.modalTitle}>{t("manageModels")}</h4>
-          {flow.staleNotice && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
+          {/* staleNotice 双语义分流（R1-4）：删除类未消解时用 removalNeedsLive（下方横幅已表达，
+              此处不再叠加误导性的 previewStale）；否则维持「请重新预览并确认」原义 */}
+          {flow.staleNotice && !(removedCount > 0 && p.evidence?.source !== "live") && <p style={styles.banner}>⚠ {t("previewStale")}</p>}
           <p style={styles.modalText}>{sourceLine}</p>
           {isStale && <p style={styles.banner}>⚠ {t("srcStale")}</p>}
         </div>
@@ -403,11 +412,11 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
             <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, fontSize: 12 }}
               onClick={() => emitSel(new Set([...addableIds, ...rawAllIds]))}>{t("selectAll")}</button>
             <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, fontSize: 12 }}
-              onClick={() => emitSel(new Set())}>{t("selectNone")}</button>
+              onClick={() => emitSel(new Set(lockedIds))}>{t("selectNone")}</button>
             {removalRows.length > 0 && (
               <button type="button" style={{ ...styles.button, ...styles.secondary, height: 24, fontSize: 12, ...(locked ? { opacity: 0.5, cursor: "not-allowed" } : null) }}
                 disabled={locked} title={locked ? t("removalNeedsLive") : undefined}
-                onClick={() => emitSel(new Set([...addableIds, ...rows.filter((r) => r.status === "listed").map((r) => r.id)]))}
+                onClick={() => emitSel(new Set([...addableIds, ...rows.filter((r) => r.status === "listed").map((r) => r.id), ...lockedIds]))}
               >{t("alignAction")}</button>
             )}
           </div>

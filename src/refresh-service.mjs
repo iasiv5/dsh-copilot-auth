@@ -1,6 +1,6 @@
 // refresh-service.mjs — 预览服务与账号证据（T8）。
 // 职责：内存预览快照（10 分钟、选择从原快照重算、operationId 绑定选择）、
-// 账号证据门禁（重建需 live；补充允许 ≤24h 同 intentVersion 缓存；stale 只参考不可应用）、
+// 账号证据门禁（移除类变更需 live＋latest；纯新增允许 ≤24h 同 intentVersion 缓存；stale 只参考不可应用）、
 // apply 幂等（同 operationId 返回已知结果；activeOperation 未终结时新 apply 423）、
 // boot/apply/retire 同一队列串行。
 // 事务内核（T9）经 transaction 注入：{runApply({snapshot}), bootRecover(), retire({operationId})}。
