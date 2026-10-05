@@ -1,11 +1,14 @@
-// refresh-flow.mjs — 「补充模型／重建模型列表」client 侧状态机（协议 v2，T11）。
+// refresh-flow.mjs — 「管理模型列表」client 侧状态机（协议 v3，ADR 0005 / Q32–Q36）。
 // reduce 为纯函数；runEffect/advance 只使用注入的 fetchImpl（node:test 可测）。
-// 状态：idle → previewing → confirming（勾选→materialize 循环）→ applying →
-//   result / pendingRestart / checking / busy / resultUnknown；recovery-needed 经
-//   retireConfirm → retiring → 重新预览闭环。
+// 状态：idle → previewing → confirming（勾选→materialize 循环；缓存证据＋删除提案时
+// 自动 live 升级：闩锁、硬失败回退 materialize、软降级置 staleNotice）→ applying →
+// result / pendingRestart / checking / busy / resultUnknown；recovery-needed 经
+// retireConfirm → retiring → 重新预览闭环。
 // 关键规则：
-//  - 候选默认全不勾选；选择变化经 basePreviewId 从原快照 materialize（不重新取数）
-//  - 重建需二次确认；空目标需单独确认（reducer 强制，UI 负责走完流程）
+//  - 勾选集合即终态；选择变化经 basePreviewId 从原快照 materialize（不重新取数）
+//  - 确认门按实际 diff：removed>0 ∨ clearOverrides ∨ 空目标 → 二次确认；空目标另需 empty
+//  - 升级判定覆盖两条 preview-ok 迁移路径（初始进入与 confirming 内原位替换）；
+//    升级在途置 materializing（确认门拦截）；硬失败回退保留勾选，软降级置 staleNotice
 //  - 423 转 status 查询；apply 网络不明先查同 operationId，绝不换 ID 重发
 //  - 预览过期/漂移（409 preview-stale/auth-changed/preview-invalid）→ 自动重新预览
 import { routes, PROTOCOL_VERSION } from "./shared.mjs";
@@ -37,6 +40,49 @@ export function refreshBlocked(flags) {
   return flags?.scopeAvailable === false || mode === "blocked" || mode === "unknown";
 }
 
+// lastSelection → effect 选择字段（逐字段在场性复制；空对象 → 不带任何选择字段）
+function selectionFields(lastSelection = {}) {
+  const out = {};
+  if (lastSelection.selectedIds !== undefined) out.selectedIds = lastSelection.selectedIds;
+  if (lastSelection.clearOverrides !== undefined) out.clearOverrides = lastSelection.clearOverrides;
+  if (lastSelection.confirmEmpty !== undefined) out.confirmEmpty = lastSelection.confirmEmpty;
+  return out;
+}
+
+// 升级判定：删除提案 ∧ 有效缓存 ∧ latest 目录 ∧ 闩锁未用 → 发新鲜预览（不走 basePreviewId）。
+// 初始默认预览的 lastSelection 为空对象 → 升级 effect 不带选择字段，服务端按 live 数据重算默认
+// （全漂移 corner 因此不可能触发空目标确认，M01 弹窗必开）。
+function upgradeCandidate(state) {
+  const p = state.preview;
+  if (!p || state.liveUpgradeUsed) return null;
+  if ((p.diff?.removed?.length ?? 0) === 0) return null;
+  if (p.evidence?.source !== "cache" || p.evidence?.stale === true) return null;
+  if (p.catalogSource !== "latest") return null;
+  return {
+    type: "preview",
+    operation: p.operation,
+    catalogSource: p.catalogSource,
+    ...selectionFields(state.lastSelection),
+  };
+}
+
+// 进入 confirming（两条 preview-ok 迁移路径共用）：先落确认基态，再评估自动升级。
+function enterConfirming({ flags, preview, staleNotice, lastSelection }) {
+  const state = {
+    name: "confirming",
+    flags: flags ?? initial.flags,
+    preview,
+    staleNotice: staleNotice === true,
+    materializing: false,
+    awaitingUpgrade: false,
+    liveUpgradeUsed: false,
+    lastSelection: lastSelection ?? {},
+  };
+  const effect = upgradeCandidate(state);
+  if (!effect) return [state, null];
+  return [{ ...state, liveUpgradeUsed: true, awaitingUpgrade: true, materializing: true }, effect];
+}
+
 export function reduce(state, event) {
   switch (state.name) {
     case "idle":
@@ -46,17 +92,14 @@ export function reduce(state, event) {
     case "busy":
     case "resultUnknown": {
       if (event.type === "start") {
+        // v3 单一操作：恒为 manage（无 legacy 字面量分支）
         return [{
           name: "previewing",
           flags: state.flags ?? initial.flags,
-          operation: event.operation === "rebuild" ? "rebuild" : "supplement",
+          operation: "manage",
           catalogSource: event.catalogSource,
           stale: false,
-        }, {
-          type: "preview",
-          operation: event.operation === "rebuild" ? "rebuild" : "supplement",
-          catalogSource: event.catalogSource,
-        }];
+        }, { type: "preview", operation: "manage", catalogSource: event.catalogSource }];
       }
       if (event.type === "init" && state.name === "idle") return [state, { type: "status" }];
       if (event.type === "check" && state.name === "resultUnknown") {
@@ -87,7 +130,7 @@ export function reduce(state, event) {
     }
     case "previewing": {
       if (event.type === "preview-ok") {
-        return [{ name: "confirming", flags: state.flags ?? initial.flags, preview: event.preview, staleNotice: state.stale === true }, null];
+        return enterConfirming({ flags: state.flags ?? initial.flags, preview: event.preview, staleNotice: state.stale === true });
       }
       if (event.type === "preview-fail") return [{ name: "failed", flags: state.flags ?? initial.flags, error: event.error }, null];
       return [state, null];
@@ -95,53 +138,93 @@ export function reduce(state, event) {
     case "confirming": {
       const p = state.preview;
       if (event.type === "select") {
+        const lastSelection = { ...selectionFields({
+          selectedIds: event.selectedIds,
+          clearOverrides: event.clearOverrides,
+          confirmEmpty: event.confirmEmpty,
+        }) };
         // 选择变化：从原快照 materialize（服务端重算，沿用原有效期，不重新取数）。
-        // 留在 confirming＋materializing 标记——弹窗保持挂载、不卸载重挂；
-        // 历史实现切回 previewing 导致弹窗整体关闭再打开（勾选闪烁的根因，2026-10-05）。
+        // 留在 confirming＋materializing——弹窗保持挂载、不卸载重挂。
         return [{
           name: "confirming",
           flags: state.flags ?? initial.flags,
           preview: p,
           materializing: true,
+          awaitingUpgrade: false,
+          liveUpgradeUsed: state.liveUpgradeUsed ?? false,
+          lastSelection,
           staleNotice: state.staleNotice,
         }, {
           type: "preview",
           operation: p.operation,
           catalogSource: p.catalogSource,
           basePreviewId: p.previewId,
-          selectedIds: event.selectedIds ?? [],
-          confirmEmpty: event.confirmEmpty === true,
+          ...selectionFields(lastSelection),
         }];
       }
       if (event.type === "preview-ok") {
-        // materialize/切源完成：预览原位替换（新 previewId 绑定新选择）
-        return [{ name: "confirming", flags: state.flags ?? initial.flags, preview: event.preview, staleNotice: state.stale === true, materializing: false }, null];
+        // materialize/切源/升级完成：预览原位替换（新 previewId 绑定新选择）。
+        // 升级软降级（R4-3）：落地后证据仍非 live → staleNotice（UI 据此禁用 apply）。
+        const wasUpgrade = state.awaitingUpgrade === true;
+        const landed = {
+          name: "confirming",
+          flags: state.flags ?? initial.flags,
+          preview: event.preview,
+          materializing: false,
+          awaitingUpgrade: false,
+          liveUpgradeUsed: state.liveUpgradeUsed ?? false,
+          lastSelection: state.lastSelection ?? {},
+          staleNotice: (wasUpgrade && event.preview?.evidence?.source !== "live") || state.staleNotice === true,
+        };
+        const effect = upgradeCandidate(landed);
+        if (effect) return [{ ...landed, liveUpgradeUsed: true, awaitingUpgrade: true, materializing: true }, effect];
+        return [landed, null];
       }
       if (event.type === "preview-fail") {
+        if (state.awaitingUpgrade === true && p) {
+          // 升级硬失败回退：以升级前快照 materialize（逐字段复制 lastSelection，保留勾选）；
+          // 弹窗保持挂载；回退后再失败才落 failed。
+          return [{
+            name: "confirming",
+            flags: state.flags ?? initial.flags,
+            preview: p,
+            materializing: true,
+            awaitingUpgrade: false,
+            liveUpgradeUsed: state.liveUpgradeUsed ?? true,
+            lastSelection: state.lastSelection ?? {},
+            staleNotice: true,
+          }, {
+            type: "preview",
+            operation: p.operation,
+            catalogSource: p.catalogSource,
+            basePreviewId: p.previewId,
+            ...selectionFields(state.lastSelection),
+          }];
+        }
         return [{ name: "failed", flags: state.flags ?? initial.flags, error: event.error }, null];
       }
       if (event.type === "start") {
-        // 显式切源（overlay/local）或切换操作：生成全新预览（不隐式降级，Q7）。
-        // 同 select：留在 confirming 保持弹窗挂载。
+        // 显式切源（overlay/local）：生成全新预览（不隐式降级，Q7）；留在 confirming 保持弹窗挂载
         return [{
           name: "confirming",
           flags: state.flags ?? initial.flags,
           preview: p,
           materializing: true,
+          awaitingUpgrade: false,
+          liveUpgradeUsed: state.liveUpgradeUsed ?? false,
+          lastSelection: state.lastSelection ?? {},
           staleNotice: state.staleNotice,
-        }, {
-          type: "preview",
-          operation: event.operation === "rebuild" ? "rebuild" : p.operation,
-          catalogSource: event.catalogSource,
-        }];
+        }, { type: "preview", operation: p.operation, catalogSource: event.catalogSource }];
       }
       if (event.type === "confirm") {
-        if (state.materializing) return [state, null]; // 物化中不得用旧 previewId 应用
-        const isRebuild = p.operation === "rebuild";
-        const emptyTarget = isRebuild && (p.diff?.targetView?.models ?? []).length === 0;
-        if (isRebuild && event.second !== true) return [state, null]; // 重建需二次确认
-        if (emptyTarget && event.empty !== true) return [state, null]; // 清空需单独确认
+        if (state.materializing) return [state, null]; // 物化/升级在途不得用旧 previewId 应用
         if (p.evidence?.stale === true) return [state, null]; // stale 证据不可应用（Q7）
+        // 确认门按实际 diff（Q35/R1）：removed>0 ∨ 清除定制 ∨ 空目标 → 二次确认
+        const removedCount = (p.diff?.removed ?? []).length;
+        const emptyTarget = (p.diff?.selectedIds ?? []).length === 0 && p.hadModels === true;
+        const needsEscalate = removedCount > 0 || p.clearOverrides === true || emptyTarget;
+        if (needsEscalate && event.second !== true) return [state, null];
+        if (emptyTarget && event.empty !== true) return [state, null]; // 清空需单独确认
         return [{ name: "applying", flags: state.flags ?? initial.flags, preview: p }, { type: "apply", previewId: p.previewId, operationId: p.operationId }];
       }
       if (event.type === "cancel") return [{ ...initial, flags: state.flags ?? initial.flags, lastResult: state.lastResult ?? null }, null];
@@ -216,11 +299,14 @@ export async function runEffect(effect, fetchImpl) {
     body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION, ...body }),
   });
   if (effect.type === "preview") {
+    // 选择字段按在场性组装（R1-9）：初始预览不带；materialize/升级/回退按 effect 实际字段携带
     const res = await post(r.refreshPreview, {
       operation: effect.operation,
       ...(effect.catalogSource ? { catalogSource: effect.catalogSource } : {}),
-      ...(effect.basePreviewId ? { basePreviewId: effect.basePreviewId, selectedIds: effect.selectedIds ?? [] } : {}),
-      ...(effect.confirmEmpty ? { confirmEmpty: true } : {}),
+      ...(effect.basePreviewId !== undefined ? { basePreviewId: effect.basePreviewId } : {}),
+      ...(effect.selectedIds !== undefined ? { selectedIds: effect.selectedIds } : {}),
+      ...(effect.clearOverrides !== undefined ? { clearOverrides: effect.clearOverrides } : {}),
+      ...(effect.confirmEmpty !== undefined ? { confirmEmpty: effect.confirmEmpty } : {}),
     });
     if (res.ok) return { type: "preview-ok", preview: res.body };
     return { type: "preview-fail", error: res.error?.details?.errorCode ?? res.error?.messageKey };
