@@ -1,6 +1,6 @@
 {
   "name": "@inventec/dsh-copilot-auth",
-  "version": "1.2.19",
+  "version": "1.2.20",
   "description": "为内置 Copilot 提供方补设备码登录设置页，预置开箱路由；凭据入内置凭据库，模型目录兜底不覆盖定制。v1.2.19：管理模型列表 v3 目标状态编辑（分组全表/挽留/对齐/清空语义告知）＋单次确认＋移除请求撤回＋退出残影修复。v1.2.18：授权失败附网络失败码＋人性化提示。适配 DSH 0.1.7+（≤0.1.5 请用 1.1.x）。",
   "type": "module",
   "license": "MIT",
@@ -21,6 +21,8 @@
     "lib/client.js",
     "cordis.patch.yml",
     "README.md",
+    "docs/CHANGELOG.md",
+    "docs/assets",
     "LICENSE",
     "src/catalog.mjs",
     "src/catalog-registry.mjs",
@@ -41,7 +43,8 @@
   "scripts": {
     "build": "node scripts/build-client.mjs",
     "test": "node --test",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "capture": "node scripts/capture-previews.mjs"
   },
   "engines": {
     "node": ">=20"
@@ -51,6 +54,7 @@
   },
   "devDependencies": {
     "esbuild": "^0.24.0",
+    "playwright-core": "1.62.1",
     "react": "^18.2.0",
     "yaml": "^2.5.0"
   },
