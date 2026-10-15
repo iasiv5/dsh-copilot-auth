@@ -1,6 +1,5 @@
 # @inventec/dsh-copilot-auth
 
-[![Release](https://img.shields.io/github/v/release/iasiv5/dsh-copilot-auth?label=Release&sort=semver)](https://github.com/iasiv5/dsh-copilot-auth/releases)
 [![npm](https://img.shields.io/npm/v/%40inventec%2Fdsh-copilot-auth?label=npm)](https://www.npmjs.com/package/@inventec/dsh-copilot-auth)
 [![CI](https://img.shields.io/github/actions/workflow/status/iasiv5/dsh-copilot-auth/ci.yml?branch=main&label=CI)](https://github.com/iasiv5/dsh-copilot-auth/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/iasiv5/dsh-copilot-auth?label=License)](https://github.com/iasiv5/dsh-copilot-auth/blob/main/LICENSE)
@@ -83,7 +82,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型在本机
 | **v1.2.x** | `0.1.7-rc.2` ～ `0.2.0-rc.2` | 当前线；`0.2.0` 起注意插件 peer 精确版本守卫 |
 | v1.1.x | `0.1.2-rc.1` ～ `0.1.5-rc.2` | 旧版线；依赖 v1.2.0 已移除的 authorization 挂载补丁，新版 DSH 上无法激活 |
 
-逐版本沿革（v1.2.0 ～ v1.2.20 完整说明与已移除能力的语义记录）见 [docs/CHANGELOG.md](./docs/CHANGELOG.md) 与 [GitHub Releases](https://github.com/iasiv5/dsh-copilot-auth/releases)。
+逐版本沿革（v1.2.0 ～ v1.2.20 完整说明与已移除能力的语义记录）见 [docs/CHANGELOG.md](./docs/CHANGELOG.md)。
 
 ## FAQ
 
