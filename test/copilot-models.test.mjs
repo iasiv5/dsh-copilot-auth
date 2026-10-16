@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { copilotBaseUrl, fetchLiveAvailableModelIds } from "../src/copilot-models.mjs";
+import { copilotBaseUrl, fetchLiveAvailableModelIds, parseAccessExpiryMs, refreshEphemeralAccess } from "../src/copilot-models.mjs";
 
 const INDIVIDUAL_TOKEN = "tid=1;exp=2;proxy-ep=proxy.individual.githubcopilot.com;";
 const PLAIN_TOKEN = "tid=1;exp=2;"; // 无 proxy-ep
@@ -120,4 +120,65 @@ test("非 200 → 抛错（调用方回退 cache）；响应非 data 数组 → 
 
 test("无 access → 抛错（调用方回退 cache）", async () => {
   await assert.rejects(fetchLiveAvailableModelIds({ credential: {}, fetchImpl: async () => jsonRes({}) }));
+});
+
+// ---- v1.2.21：exp 解析与 ephemeral 续期（计划 Task 1）----
+
+test("parseAccessExpiryMs：exp 秒 → 毫秒；缺失/非数字/undefined → null", () => {
+  assert.equal(parseAccessExpiryMs("tid=1;exp=2000;proxy-ep=proxy.individual.githubcopilot.com;"), 2000000);
+  assert.equal(parseAccessExpiryMs("tid=1;"), null, "无 exp 字段 → null");
+  assert.equal(parseAccessExpiryMs(undefined), null);
+  assert.equal(parseAccessExpiryMs("tid=1;exp=NaN;"), null, "非数字 exp → null");
+});
+
+test("refreshEphemeralAccess 成功：v2/token URL＋Bearer refresh＋COPILOT_HEADERS（无 api-version）＋5min 提前量", async () => {
+  const calls = [];
+  const fetchImpl = mockFetch({
+    "https://api.github.com/copilot_internal/v2/token": () => jsonRes({ token: "tid=2;exp=999999;", expires_at: 1000000 }),
+  }, calls);
+  const out = await refreshEphemeralAccess({ refreshToken: "ghu-x", fetchImpl });
+  assert.equal(out.access, "tid=2;exp=999999;");
+  assert.equal(out.expiresAtMs, 999700000, "expires_at×1000 − 5×60×1000 提前量");
+  assert.equal(calls[0].url, "https://api.github.com/copilot_internal/v2/token");
+  assert.equal(calls[0].init.headers.Authorization, "Bearer ghu-x");
+  assert.equal(calls[0].init.headers["User-Agent"], "GitHubCopilotChat/0.35.0");
+  assert.equal(calls[0].init.headers["X-GitHub-Api-Version"], undefined, "续期调用不带 api-version（对齐 pi-ai refresh 路径）");
+  assert.ok(calls[0].init.signal, "5s 超时 signal 必须存在");
+});
+
+test("refreshEphemeralAccess：enterpriseUrl 归一 → api.<domain>/copilot_internal/v2/token", async () => {
+  const calls = [];
+  const fetchImpl = mockFetch({
+    "https://api.ghe.com/copilot_internal/v2/token": () => jsonRes({ token: "tid=e;", expires_at: 5 }),
+  }, calls);
+  const out = await refreshEphemeralAccess({ refreshToken: "ghu-e", enterpriseUrl: "ghe.com", fetchImpl });
+  assert.equal(out.access, "tid=e;");
+  assert.equal(calls[0].url, "https://api.ghe.com/copilot_internal/v2/token");
+});
+
+test("refreshEphemeralAccess 失败分型：401 带 status；非对象/缺字段两条消息保真；网络错误原样上抛", async () => {
+  const unauthorized = mockFetch({ "https://api.github.com/copilot_internal/v2/token": () => jsonRes({}, 401) });
+  await assert.rejects(
+    refreshEphemeralAccess({ refreshToken: "ghu-x", fetchImpl: unauthorized }),
+    (err) => err.status === 401 && /401/.test(err.message),
+    "HTTP 失败须携带 status 供调用方分型",
+  );
+  const nonObject = mockFetch({ "https://api.github.com/copilot_internal/v2/token": () => jsonRes("nope") });
+  await assert.rejects(
+    refreshEphemeralAccess({ refreshToken: "ghu-x", fetchImpl: nonObject }),
+    /Invalid Copilot token response$/,
+    "非对象响应消息对齐 pi-ai 0.87.1 L261",
+  );
+  const missingFields = mockFetch({ "https://api.github.com/copilot_internal/v2/token": () => jsonRes({ token: 1, expires_at: "x" }) });
+  await assert.rejects(
+    refreshEphemeralAccess({ refreshToken: "ghu-x", fetchImpl: missingFields }),
+    /Invalid Copilot token response fields/,
+    "字段缺失消息对齐 pi-ai 0.87.1 L264",
+  );
+  const netfail = mockFetch({});
+  await assert.rejects(
+    refreshEphemeralAccess({ refreshToken: "ghu-x", fetchImpl: netfail }),
+    /unexpected fetch/,
+    "网络错误原样上抛（调用方分类为 network）",
+  );
 });

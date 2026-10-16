@@ -2,8 +2,11 @@
 // ⚠️ 显式耦合 pi-ai 0.84.4：COPILOT_HEADERS / COPILOT_API_VERSION / normalizeDomain /
 // getGitHubCopilotBaseUrl / parseGitHubCopilotModelCatalog 的语义逐行抄录自
 // @earendil-works/pi-ai@0.84.4 dist/auth/oauth/github-copilot.js。
-// 不实现 token 获取/刷新/policy 修改；语义漂移或任何失败一律由调用方回退凭证缓存
+// 不实现 token 获取/policy 修改；token 刷新仅限 v1.2.21 起的 ephemeral 续期（见文末，
+// 只存内存、绝不落库）；其余语义漂移或任何失败一律由调用方回退凭证缓存
 // （payload.availableModelIds）。pi-ai 升级后本文件必须对照新版源码复核。
+// v1.2.21 增抄：copilot_internal/v2/token 续期语义抄录自 pi-ai dist/auth/oauth/github-copilot.js
+// refreshGitHubCopilotAccessToken（0.84.4 与 0.87.1 该函数 diff 为空）；ephemeral 使用、绝不落库。
 
 // ↓↓↓ 以下常量抄录自 pi-ai 0.84.4 dist/auth/oauth/github-copilot.js（勿改值）
 const COPILOT_HEADERS = {
@@ -110,4 +113,44 @@ export async function fetchLiveAvailableModelIds({ credential, fetchImpl } = {})
     throw new Error(`${response.status} ${response.statusText}: GET ${baseUrl}/models`);
   }
   return parseAvailableModelIds(await response.json(), allowPolicyFallback);
+}
+
+// 本地解析 access（tid 会话令牌）内的 exp=（秒 → 毫秒）；缺失/不可解析 → null。
+// 零网络：调用方据此在发请求前判断"是否需要续期"。
+export function parseAccessExpiryMs(access) {
+  const match = String(access ?? "").match(/exp=(\d+)/);
+  return match ? Number(match[1]) * 1000 : null;
+}
+
+// 铸一枚新的短命 tid：GET copilot_internal/v2/token（Bearer = 长期 ghu）。
+// 语义抄录自 pi-ai refreshGitHubCopilotAccessToken（见文件头）；单次尝试、5s 超时、
+// 不重试、结果仅存内存（调用方绝不写回凭据库）。HTTP 失败抛错并携 status 供分型
+// （401/403 → 长期令牌被拒；其余/网络 → network）。错误消息保真对齐 0.87.1 L261/L264。
+export async function refreshEphemeralAccess({ refreshToken, enterpriseUrl, fetchImpl } = {}) {
+  if (typeof refreshToken !== "string" || refreshToken === "" || typeof fetchImpl !== "function") {
+    throw new Error("refreshToken and fetchImpl required");
+  }
+  const domain = normalizeDomain(enterpriseUrl) ?? "github.com";
+  const url = `https://api.${domain}/copilot_internal/v2/token`;
+  const response = await fetchImpl(url, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${refreshToken}`,
+      ...COPILOT_HEADERS,
+    },
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) {
+    throw Object.assign(new Error(`${response.status} ${response.statusText}: GET ${url}`), { status: response.status });
+  }
+  const raw = await response.json();
+  if (!raw || typeof raw !== "object") {
+    throw new Error("Invalid Copilot token response");
+  }
+  const token = raw.token;
+  const expiresAt = raw.expires_at;
+  if (typeof token !== "string" || typeof expiresAt !== "number") {
+    throw new Error("Invalid Copilot token response fields");
+  }
+  return { access: token, expiresAtMs: expiresAt * 1000 - 5 * 60 * 1000 };
 }
