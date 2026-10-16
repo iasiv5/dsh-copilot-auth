@@ -208,3 +208,10 @@ Produces：水合与 busy 态行为变更；retireConfirm 双入口（result 入
 2. `npm run build` 成功且 `lib/client.js` 含 4 个新文案键（各 ≥2 次）。
 3. `node --test test/refresh-flow.test.mjs` 用例 A–D 全绿（032 回归守卫）。
 4. 手工冒烟（可选，主人配合）：①tid 过期态下打开管理模型列表 → 来源行显示"实时获取"，取消勾选一个在列模型 → 应用更改成功；②若现场存在 032 卡死操作（`/status.refresh.activeOperation` 非空且 recovery-needed），刷新页面 → busy＋「结束旧配置意图」按钮可见，点击确认后可重新 apply。journal 无新报错。
+
+## 勘误注（执行期发现，2026-10-16 归档补记，评审 R1-1/R1-2）
+
+1. Step 1.1「expiresAtMs: 999700000000」为字面值笔误：按其公式（1000000×1000 − 300000）正确值为 **999700000**。实现与测试均按公式执行，正确。
+2. Step 2.1「INDIVIDUAL_TOKEN 改为 exp=100000000（远未来）」单位有误：exp 为**秒**制，10^8 s ≈ 1973 年（过去）。真实时钟语境（host.test.mjs 走 Date.now）已改用 exp=4000000000（2096 年）；refresh-service 假时钟（t.now=1_000_000ms）两值皆可，已统一为 4000000000。执行提交 9326fa7 以"exp 秒制陷阱修正"留痕。
+3. 实现对 `refreshEphemeralAccess` 的 `refreshToken` 增加空串拒绝（计划原文只写"非串"）——防御性加强，行为正确，留档防未来"实现与计划不一致"误判。
+4. 申报偏离两处（执行审核第 1 轮核验通过）：`fetchLiveAvailableModelIds` 抛错补携 `.status`（Step 2.3 第 6 条 401/403 分型的实现前提，与 refreshEphemeralAccess 同款）；host.test.mjs 夹具 token 远未来化（同第 2 条）。
