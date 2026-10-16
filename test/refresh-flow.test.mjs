@@ -411,3 +411,58 @@ test("通道门控：blocked/unknown/scope 不可用时入口禁用（G02），f
   assert.equal(refreshBlocked({ catalogMode: "file", scopeAvailable: true }), false);
   assert.equal(refreshBlocked({ catalogMode: null, scopeAvailable: true }), false, "旧宿主缺字段不误伤");
 });
+
+// ---- v1.2.21：032 busy 卡死出口——水合判序＋busy 态 retire（计划 Task 4）----
+
+const STUCK_ACTIVE = { operationId: "op-stuck", phase: "config-commit", phaseResult: { status: "recovery-needed", error: "intent-version-drift" } };
+
+test("032 用例 A 水合遮蔽回归：recovery-needed 的 activeOperation 优先于旧 applied lastResult", () => {
+  const s = reduce(initial, { type: "hydrate", status: { refresh: {
+    scopeAvailable: true, catalogMode: "file",
+    lastResult: { operationId: "op-old", status: "applied" },
+    activeOperation: STUCK_ACTIVE,
+  } } })[0];
+  assert.equal(s.name, "busy", "不再被旧 lastResult 遮蔽");
+  assert.equal(s.active.operationId, "op-stuck");
+});
+
+test("032 用例 B pending-restart 守卫：非 recovery-needed 判据不劫持既有水合顺序", () => {
+  const s = reduce(initial, { type: "hydrate", status: { refresh: {
+    scopeAvailable: true, catalogMode: "file",
+    lastResult: { operationId: "op-ok", status: "pending-restart" },
+    activeOperation: { operationId: "op-ok", phaseResult: { status: "pending-restart" } },
+  } } })[0];
+  assert.equal(s.name, "pendingRestart", "正常等重启流程不受新判据影响");
+});
+
+test("032 用例 C busy retire 闭环：确认携 active.operationId；retire-ok 闭环；retire-fail 回 busy", async () => {
+  const f = makeFetch();
+  const busyState = { ...initial, name: "busy", active: STUCK_ACTIVE };
+  let s = reduce(busyState, { type: "retire-request" })[0];
+  assert.equal(s.name, "retireConfirm");
+  assert.equal(s.active.operationId, "op-stuck");
+  f.respond(R, { body: { ok: true, result: { operationId: "op-stuck", status: "intent-retired" } } });
+  f.respond(S, { body: { refresh: { scopeAvailable: true, catalogMode: "file", lastResult: { operationId: "op-stuck", status: "intent-retired" }, activeOperation: null } } });
+  s = await advance(s, { type: "retire-confirm" }, f);
+  assert.equal(s.name, "result", "retire-ok → status 水合 → result 闭环");
+  assert.equal(f.bodies.find((x) => x.url === R)?.body.operationId, "op-stuck", "operationId 取自 active");
+  // 失败回路：retire 网络失败 → 回 busy（携 active），不落空 result
+  const f2 = makeFetch();
+  f2.respondOnce(R, { status: 500, body: { ok: false, error: "retireboom" } });
+  const busy2 = { ...initial, name: "busy", active: STUCK_ACTIVE };
+  const s2a = reduce(busy2, { type: "retire-request" })[0];
+  assert.equal(s2a.name, "retireConfirm");
+  const s2b = await advance(s2a, { type: "retire-confirm" }, f2);
+  assert.equal(s2b.name, "busy", "retire-fail 回 busy，不再落空 result 死端");
+  assert.equal(s2b.active.operationId, "op-stuck");
+});
+
+test("032 用例 D 判据外不出口＋cancel 回 busy：非 recovery-needed 无 retire；busy 入口 cancel 不落空 result", () => {
+  const busyOther = { ...initial, name: "busy", active: { operationId: "op-x", phaseResult: { status: "pending-restart" } } };
+  const s1 = reduce(busyOther, { type: "retire-request" })[0];
+  assert.equal(s1.name, "busy", "非 recovery-needed 不给 retire 出口");
+  const confirmFromBusy = { name: "retireConfirm", active: STUCK_ACTIVE };
+  const s2 = reduce(confirmFromBusy, { type: "cancel" })[0];
+  assert.equal(s2.name, "busy", "busy 入口 cancel 回 busy");
+  assert.equal(s2.active.operationId, "op-stuck");
+});

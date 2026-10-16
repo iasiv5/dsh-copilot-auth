@@ -763,7 +763,14 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
             <p style={styles.banner}>⚠ {t("pendingRestart")}</p>
           )}
           {flow.name === "busy" && (
-            <p style={styles.banner}>ⓘ {t("busy")}</p>
+            <p style={styles.banner}>ⓘ {t("busy")}{flow.retireError ? `（${flow.retireError}）` : ""}</p>
+          )}
+          {flow.name === "busy" && flow.active?.phaseResult?.status === "recovery-needed" && (
+            <div>
+              <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={() => drive({ type: "retire-request" })}>
+                {t("retireBtn")}
+              </button>
+            </div>
           )}
           {flow.name === "resultUnknown" && (
             <>

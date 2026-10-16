@@ -3,7 +3,9 @@
 // 状态：idle → previewing → confirming（勾选→materialize 循环；缓存证据＋删除提案时
 // 自动 live 升级：闩锁、硬失败回退 materialize、软降级置 staleNotice）→ applying →
 // result / pendingRestart / checking / busy / resultUnknown；recovery-needed 经
-// retireConfirm → retiring → 重新预览闭环。
+// retireConfirm → retiring → 重新预览闭环；busy 态在 active.phaseResult.status ===
+// "recovery-needed" 时同样提供 retire 出口（032），水合时该判据优先于旧 lastResult
+// （防旧 "applied" 遮蔽卡死操作），retire 失败回 busy 可重试。
 // 关键规则：
 //  - 勾选集合即终态；选择变化经 basePreviewId 从原快照 materialize（不重新取数）
 //  - 确认门按实际 diff：removed>0 ∨ clearOverrides ∨ 空目标 → 二次确认；空目标另需 empty
@@ -108,6 +110,10 @@ export function reduce(state, event) {
       if (event.type === "retire-request" && state.name === "result") {
         return [{ name: "retireConfirm", result: state.result }, null];
       }
+      // 032：busy 态的 retire 出口——仅当卡死操作已 recovery-needed（静止核实后清，绝不写配置）
+      if (event.type === "retire-request" && state.name === "busy" && state.active?.phaseResult?.status === "recovery-needed") {
+        return [{ name: "retireConfirm", active: state.active }, null];
+      }
       if (event.type === "dismiss" && state.name === "failed") {
         return [{ ...initial, flags: state.flags }, null];
       }
@@ -116,6 +122,10 @@ export function reduce(state, event) {
         if (!event.status) return [state, null];
         if (refresh?.lastError === "state-corrupt") return [{ ...state, name: "failed", error: "state-corrupt" }, null];
         const base = fromRefresh({ ...initial, name: "idle" }, refresh);
+        // 032 水合判序：卡死操作（recovery-needed）优先于旧 lastResult，防旧 "applied" 遮蔽 busy 死锁
+        if (refresh?.activeOperation?.phaseResult?.status === "recovery-needed") {
+          return [{ ...base, name: "busy", active: refresh.activeOperation }, null];
+        }
         if (restartStates.has(refresh?.lastResult?.status ?? "") || refresh?.pendingRestart === true) {
           return [{ ...base, name: "pendingRestart", result: refresh.lastResult }, null];
         }
@@ -271,14 +281,20 @@ export function reduce(state, event) {
     }
     case "retireConfirm": {
       if (event.type === "retire-confirm") {
-        return [{ name: "retiring", operationId: state.result?.operationId, result: state.result }, { type: "retire", operationId: state.result?.operationId }];
+        // 双入口：result 入口携 result；busy 入口（032）携 active——operationId 二选一
+        return [{ name: "retiring", operationId: state.result?.operationId ?? state.active?.operationId, result: state.result, active: state.active }, { type: "retire", operationId: state.result?.operationId ?? state.active?.operationId }];
       }
-      if (event.type === "cancel") return [{ name: "result", result: state.result }, null];
+      if (event.type === "cancel") return state.active ? [{ name: "busy", active: state.active }, null] : [{ name: "result", result: state.result }, null];
       return [state, null];
     }
     case "retiring": {
       if (event.type === "retire-ok") return [{ ...state, name: "checking" }, { type: "status" }];
-      if (event.type === "retire-fail") return [{ name: "result", result: state.result, retireError: event.error }, null];
+      if (event.type === "retire-fail") {
+        // 032：busy 入口失败回 busy 可重试；result 入口维持既有落点
+        return state.active
+          ? [{ name: "busy", active: state.active, retireError: event.error }, null]
+          : [{ name: "result", result: state.result, retireError: event.error }, null];
+      }
       return [state, null];
     }
     default:
