@@ -71,6 +71,10 @@ const DICTS = {
     skippedModels: "Upstream entries skipped by validation",
     srcLive: "Account models: live",
     srcCache: "Account models: cached at {time}; removals require upgrading to live evidence",
+    srcCacheExpired: "Account models: cached at {time}. The session token is expired and could not be auto-renewed — chat with any Copilot model once; if it still fails, sign out and authorize again.",
+    srcCacheRejected: "Account models: cached at {time}. The local token was rejected by GitHub (possibly re-authorized on another device) — sign out and authorize again.",
+    srcCacheNetwork: "Account models: cached at {time}. Live evidence is temporarily unreachable — reopen this dialog later to retry.",
+    srcCacheNoSession: "Account models: cached at {time}. No local session token — authorize first.",
     srcStale: "The cache has no trusted timestamp, is expired, or belongs to changed authorization; reference only.",
     srcLatest: "Catalog source: latest pi-ai from npm",
     srcLocal: "Catalog source: local (npm fetch failed)",
@@ -158,6 +162,10 @@ const DICTS = {
     skippedModels: "被校验跳过的上游条目",
     srcLive: "账号模型：实时获取",
     srcCache: "账号模型：缓存，获取于 {time}；移除类更改需升级为实时证据",
+    srcCacheExpired: "账号模型：缓存，获取于 {time}。会话令牌已过期，未能自动续期——先用任一 Copilot 模型对话一次；若仍失败，请退出登录并重新授权。",
+    srcCacheRejected: "账号模型：缓存，获取于 {time}。本地令牌被 GitHub 拒绝（可能已在另一台设备重新授权）——请退出登录并重新授权。",
+    srcCacheNetwork: "账号模型：缓存，获取于 {time}。暂时无法获取实时证据——稍后重开此窗口重试。",
+    srcCacheNoSession: "账号模型：缓存，获取于 {time}。本地无会话令牌——请先完成授权。",
     srcStale: "缓存缺少可信时间、已过期或授权已变化，仅供参考。",
     srcLatest: "目录来源：npm 最新 pi-ai",
     srcLocal: "目录来源：本地目录（npm 拉取失败）",
@@ -311,6 +319,16 @@ function sampleThemeSurface() {
   return { bg, fg: cs.color || "inherit" };
 }
 
+// 缓存证据原因 → 文案键（v1.2.21，N3）。null-reason 缓存沿用旧 srcCache 兜底。
+function cacheCopyKey(reason) {
+  return {
+    "access-expired": "srcCacheExpired",
+    "token-rejected": "srcCacheRejected",
+    "network": "srcCacheNetwork",
+    "no-session": "srcCacheNoSession",
+  }[reason] ?? null;
+}
+
 // 模型操作弹窗（协议 v3，ADR 0005）：管理模型列表＝目标状态编辑。单张分组全表
 // （可新增/在列/待删除候选），勾选集合即期望终态；选择/清除定制经 onSelect → 服务端
 // 从原快照 materialize（不重新取数）；缓存证据＋删除提案由状态机自动升级 live；
@@ -372,7 +390,7 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
   };
   const sourceLine = [
     p.evidence?.source === "live" ? t("srcLive")
-      : p.evidence?.source === "cache" ? t("srcCache").replace("{time}", String(p.evidence?.fetchedAt ?? "")) : null,
+      : p.evidence?.source === "cache" ? (cacheCopyKey(p.evidence?.reason) ? t(cacheCopyKey(p.evidence?.reason)) : t("srcCache")).replace("{time}", String(p.evidence?.fetchedAt ?? "")) : null,
     p.catalogSource === "latest" ? t("srcLatest") : p.catalogSource === "overlay" ? t("srcOverlay") : t("srcLocal"),
   ].filter(Boolean).join(" · ");
   const groupDefs = [
