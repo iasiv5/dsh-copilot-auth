@@ -1,6 +1,7 @@
 // refresh-service.mjs — 预览服务与账号证据（T8）。
 // 职责：内存预览快照（10 分钟、选择从原快照重算、operationId 绑定选择）、
-// 账号证据门禁（移除类变更需 live＋latest；纯新增允许 ≤24h 同 intentVersion 缓存；stale 只参考不可应用）、
+// 账号证据门禁（移除类变更需 live＋latest；纯新增允许 ≤24h 同 intentVersion 缓存；stale 只参考不可应用）
+// ＋tid 过期自愈（v2/token 铸 ephemeral tid：内存、不落库、单次尝试、负缓存 5min、按 exp 复用）、
 // apply 幂等（同 operationId 返回已知结果；activeOperation 未终结时新 apply 423）、
 // boot/apply/retire 同一队列串行。
 // 事务内核（T9）经 transaction 注入：{runApply({snapshot}), bootRecover(), retire({operationId})}。
@@ -11,10 +12,11 @@ import { join } from "node:path";
 import { readJson, writeJsonAtomic, createMutex } from "./atomic-json.mjs";
 import { CREDENTIAL_KEY } from "./shared.mjs";
 import { buildModelChange } from "./model-update.mjs";
-import { fetchLiveAvailableModelIds } from "./copilot-models.mjs";
+import { fetchLiveAvailableModelIds, parseAccessExpiryMs, refreshEphemeralAccess } from "./copilot-models.mjs";
 
 const PREVIEW_TTL_MS = 10 * 60 * 1000;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const HEAL_RETRY_MS = 5 * 60 * 1000; // 自愈失败负缓存：期间不再打 v2/token
 
 function flowError(code, message, extra = {}) {
   const err = new Error(message ?? code);
@@ -25,40 +27,6 @@ function flowError(code, message, extra = {}) {
 
 const iso = (ts) => new Date(ts).toISOString();
 
-// 账号证据：live GET 成功才写缓存（fetchedAt＋intentVersion）；缓存仅 ≤24h 且同
-// intentVersion 时可作纯新增的应用依据；否则 stale——预览可展示参考，apply 被拒（Q7/Q16）。
-// 移除类变更（removed>0）在 apply 时强制 live 证据＋latest 目录（removals-need-live，Q35/R2）；
-// live 拉取失败回退有效缓存属软降级，由 client 端升级/禁用逻辑兜底（R4-3），服务端门最终兜底。
-async function resolveAccountEvidence(ctx, { scope, readIntentVersion, clock, fetchImpl }) {
-  const iv = readIntentVersion();
-  const cacheFile = join(scope.dataDir, "account-model-cache.json");
-  const readCache = () => {
-    try {
-      return readJson(cacheFile);
-    } catch {
-      return undefined;
-    }
-  };
-  const record = await ctx.credentials.readRecord(CREDENTIAL_KEY);
-  const payload = record?.payload ?? {};
-  if (payload.access) {
-    try {
-      const ids = await fetchLiveAvailableModelIds({ credential: payload, fetchImpl });
-      const fetchedAt = iso(clock.now()); // 单次取时：缓存值与返回值同源（避免毫秒漂移）
-      mkdirSync(scope.dataDir, { recursive: true });
-      writeJsonAtomic(cacheFile, { ids, fetchedAt, intentVersion: iv });
-      return { source: "live", ids, fetchedAt, stale: false };
-    } catch { /* 回退缓存判定 */ }
-  }
-  const cache = readCache();
-  if (cache && Array.isArray(cache.ids) && typeof cache.fetchedAt === "string"
-    && Number.isFinite(Date.parse(cache.fetchedAt))
-    && clock.now() - Date.parse(cache.fetchedAt) <= CACHE_TTL_MS
-    && cache.intentVersion === iv) {
-    return { source: "cache", ids: cache.ids, fetchedAt: cache.fetchedAt, stale: false };
-  }
-  return { source: "stale", ids: Array.isArray(cache?.ids) ? cache.ids : [], fetchedAt: cache?.fetchedAt ?? null, stale: true };
-}
 
 export function createRefreshService(ctx, {
   scope,
@@ -74,6 +42,80 @@ export function createRefreshService(ctx, {
   };
   const queue = createMutex();
   const snapshots = new Map(); // previewId -> snapshot（内存态；重启即失效，幂等走持久状态）
+  // 自愈三态（N1，纯内存；dispose/重启即清）：已铸的 ephemeral tid、失败负缓存时刻与原因
+  let ephemeral = null;
+  let healBlockedUntil = 0;
+  let healBlockedReason = null;
+
+  // 账号证据（v1.2.21 起闭包内化）：live GET 成功才写缓存（fetchedAt＋intentVersion）；缓存仅 ≤24h
+  // 且同 intentVersion 时可作纯新增的应用依据；否则 stale——预览可展示参考，apply 被拒（Q7/Q16）。
+  // 移除类变更（removed>0）在 apply 时强制 live 证据＋latest 目录（removals-need-live，Q35/R2）。
+  // 自愈（N1）：tid 过期且记录带 refresh 时经 v2/token 铸 ephemeral tid——a 复用（未过 exp 不重铸）、
+  // b 负缓存期内沿用上次失败原因、c 单次续期；任何失败沿用软降级回退有效缓存，并给出 reason 分型。
+  async function resolveAccountEvidence({ clock, fetchImpl }) {
+    const iv = readIntentVersion();
+    const cacheFile = join(scope.dataDir, "account-model-cache.json");
+    const readCache = () => {
+      try {
+        return readJson(cacheFile);
+      } catch {
+        return undefined;
+      }
+    };
+    const record = await ctx.credentials.readRecord(CREDENTIAL_KEY);
+    const payload = record?.payload ?? {};
+    let reason = null;
+    let access = payload?.access;
+    if (!access) {
+      reason = "no-session";
+    } else {
+      const expMs = parseAccessExpiryMs(access);
+      const accessExpired = expMs !== null && expMs <= clock.now();
+      if (accessExpired && typeof payload.refresh === "string" && payload.refresh !== "") {
+        if (ephemeral && clock.now() < ephemeral.expiresAtMs) {
+          access = ephemeral.access; // a. 复用：不打续期
+        } else if (clock.now() < healBlockedUntil) {
+          reason = healBlockedReason ?? "access-expired"; // b. 负缓存：沿用上次失败原因
+          access = undefined;
+        } else {
+          try { // c. 续期：单次尝试，成功清负缓存
+            const minted = await refreshEphemeralAccess({ refreshToken: payload.refresh, enterpriseUrl: payload.enterpriseUrl, fetchImpl });
+            ephemeral = minted;
+            healBlockedUntil = 0;
+            healBlockedReason = null;
+            if (clock.now() < minted.expiresAtMs) access = minted.access;
+          } catch (error) {
+            healBlockedUntil = clock.now() + HEAL_RETRY_MS;
+            healBlockedReason = error?.status === 401 || error?.status === 403 ? "token-rejected" : "network";
+            reason = healBlockedReason;
+            access = undefined;
+          }
+        }
+      } else if (accessExpired) {
+        reason = "access-expired"; // 过期且无 refresh：无从续期，跳过 live GET
+        access = undefined;
+      }
+    }
+    if (access) {
+      try {
+        const ids = await fetchLiveAvailableModelIds({ credential: { ...payload, access }, fetchImpl });
+        const fetchedAt = iso(clock.now()); // 单次取时：缓存值与返回值同源（避免毫秒漂移）
+        mkdirSync(scope.dataDir, { recursive: true });
+        writeJsonAtomic(cacheFile, { ids, fetchedAt, intentVersion: iv });
+        return { source: "live", ids, fetchedAt, stale: false, reason: null };
+      } catch (error) {
+        reason = error?.status === 401 || error?.status === 403 ? "token-rejected" : "network";
+      }
+    }
+    const cache = readCache();
+    if (cache && Array.isArray(cache.ids) && typeof cache.fetchedAt === "string"
+      && Number.isFinite(Date.parse(cache.fetchedAt))
+      && clock.now() - Date.parse(cache.fetchedAt) <= CACHE_TTL_MS
+      && cache.intentVersion === iv) {
+      return { source: "cache", ids: cache.ids, fetchedAt: cache.fetchedAt, stale: false, reason };
+    }
+    return { source: "stale", ids: Array.isArray(cache?.ids) ? cache.ids : [], fetchedAt: cache?.fetchedAt ?? null, stale: true, reason };
+  }
   const getFetch = () => fetchImpl ?? globalThis.fetch?.bind(globalThis);
   const resolveCatalog = deps.resolveCatalog;
   const describeConfigView = deps.describeConfigView;
@@ -140,7 +182,7 @@ export function createRefreshService(ctx, {
       snapshots.set(snap.previewId, snap);
       return projectPreview(snap);
     }
-    const evidence = await resolveAccountEvidence(ctx, { scope, readIntentVersion, clock, fetchImpl: getFetch() });
+    const evidence = await resolveAccountEvidence({ clock, fetchImpl: getFetch() });
     const catalog = await resolveCatalog(catalogSource);
     const config = await describeConfigView();
     const intentVersion = readIntentVersion();
@@ -174,7 +216,7 @@ export function createRefreshService(ctx, {
       operationId: snap.operationId,
       operation: snap.operation,
       expiresAt: iso(snap.expiresAt),
-      evidence: { source: snap.evidence.source, fetchedAt: snap.evidence.fetchedAt, stale: snap.evidence.stale },
+      evidence: { source: snap.evidence.source, fetchedAt: snap.evidence.fetchedAt, stale: snap.evidence.stale, reason: snap.evidence.reason ?? null },
       catalogSource: snap.catalog.catalogSource,
       catalogError: snap.catalog.catalogError ?? null,
       skipped: snap.catalog.skipped ?? [],
@@ -280,6 +322,9 @@ export function createRefreshService(ctx, {
 
   function dispose() {
     snapshots.clear();
+    ephemeral = null;
+    healBlockedUntil = 0;
+    healBlockedReason = null;
   }
 
   // 诊断/测试观察面：当前内存快照数（含未过期；过期项在下次 preview 入口清扫）

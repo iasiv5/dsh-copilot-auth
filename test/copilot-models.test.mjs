@@ -109,7 +109,8 @@ test("非 200 → 抛错（调用方回退 cache）；响应非 data 数组 → 
   const unauthorized = mockFetch({ "https://api.individual.githubcopilot.com": () => jsonRes({}, 401) });
   await assert.rejects(
     fetchLiveAvailableModelIds({ credential: { access: INDIVIDUAL_TOKEN }, fetchImpl: unauthorized }),
-    /401/,
+    (err) => /401/.test(err.message) && err.status === 401,
+    "HTTP 失败须携带 status 供证据分型",
   );
   const garbage = mockFetch({ "https://api.individual.githubcopilot.com": () => jsonRes({ nope: true }) });
   await assert.rejects(

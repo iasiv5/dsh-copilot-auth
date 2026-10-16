@@ -110,7 +110,8 @@ export async function fetchLiveAvailableModelIds({ credential, fetchImpl } = {})
     signal: AbortSignal.timeout(5000),
   });
   if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}: GET ${baseUrl}/models`);
+    // 携 status 供调用方证据分型（401/403 → token-rejected；其余 → network），与 refreshEphemeralAccess 同款
+    throw Object.assign(new Error(`${response.status} ${response.statusText}: GET ${baseUrl}/models`), { status: response.status });
   }
   return parseAvailableModelIds(await response.json(), allowPolicyFallback);
 }

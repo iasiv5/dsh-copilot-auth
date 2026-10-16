@@ -339,7 +339,7 @@ test("HANDOFF_正常授权（版本未变）：填充恰好一次", async () => 
 // ==================== T10: refresh v2（preview/apply/retire/status 协议） ====================
 
 const FIXTURE_0844 = readFileSync(new URL("./fixtures/catalog-0844.json", import.meta.url), "utf8");
-const INDIVIDUAL_TOKEN = "tid=1;exp=2;proxy-ep=proxy.individual.githubcopilot.com;";
+const INDIVIDUAL_TOKEN = "tid=1;exp=4000000000;proxy-ep=proxy.individual.githubcopilot.com;"; // 真远未来（2096 年，秒）：v1.2.21 起证据链会预判 exp
 const GPTB_ENTRY = { id: "gpt-b", api: "openai-completions", provider: "github-copilot", contextWindow: 200000, maxTokens: 8192 };
 const OVERLAY = { "openai-completions": { "gpt-b": GPTB_ENTRY } };
 const TGZ_ENTRY_PATH = "package/dist/providers/data/github-copilot.json";

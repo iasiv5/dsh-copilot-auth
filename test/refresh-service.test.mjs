@@ -2,13 +2,14 @@
 // 快照生命周期、选择重算、证据门禁、幂等与忙、scope 降级。
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRefreshService } from "../src/refresh-service.mjs";
 import { PROTOCOL_VERSION } from "../src/shared.mjs";
 
-const INDIVIDUAL_TOKEN = "tid=1;exp=2;proxy-ep=proxy.individual.githubcopilot.com;";
+const INDIVIDUAL_TOKEN = "tid=1;exp=4000000000;proxy-ep=proxy.individual.githubcopilot.com;"; // 真远未来（2096 年，秒）：默认 harness 永不过期
+const EXPIRED_TOKEN = "tid=1;exp=1;proxy-ep=proxy.individual.githubcopilot.com;"; // exp=1s ≪ 时钟 1_000_000ms
 
 function streamRes(body, status = 200) {
   const chunks = [Buffer.from(typeof body === "string" ? body : JSON.stringify(body), "utf8")];
@@ -30,7 +31,7 @@ const view = (models, modelOverrides = null) => ({
 });
 
 function makeHarness({
-  live = "ok", record, revision = 7, rawView, effectiveView, catalog, liveModels,
+  live = "ok", heal = "ok", record, revision = 7, rawView, effectiveView, catalog, liveModels,
 } = {}) {
   const scope = { known: true, profileId: "p1", dataDir: join(mkdtempSync(join(tmpdir(), "svc-")), "copilot-auth") };
   const t = { now: 1_000_000 };
@@ -43,7 +44,7 @@ function makeHarness({
     load: () => store.value,
     save: (s) => { store.value = s; },
   };
-  const counters = { catalog: 0, config: 0, runApply: 0 };
+  const counters = { catalog: 0, config: 0, runApply: 0, token: 0 };
   const theRawView = rawView ?? view([{ id: "keep-1" }]);
   const theEffectiveView = effectiveView ?? theRawView;
   const cat = {
@@ -94,9 +95,18 @@ function makeHarness({
         : record),
     },
   };
-  const fetchImpl = async (url) => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, auth: init?.headers?.Authorization }); // 键名与生产一致（大小写敏感，约束 8）
+    if (url.includes("/copilot_internal/v2/token")) {
+      counters.token += 1;
+      if (heal === "ok") return streamRes({ token: "tid=9;exp=999999;", expires_at: Math.floor(t.now / 1000) + 3600 }, 200);
+      if (heal === "reject") return streamRes({}, 401);
+      throw new Error("connect ECONNREFUSED");
+    }
     if (url.endsWith("/models")) {
       if (liveRef.value === "fail") return streamRes({}, 401);
+      if (liveRef.value === "500") return streamRes({}, 500);
       return streamRes({ data: models.map(pickerOn) }, 200);
     }
     throw new Error("unexpected fetch: " + url);
@@ -108,7 +118,7 @@ function makeHarness({
     transaction: tx,
     fetchImpl,
   });
-  return { service, scope, t, clock, intent, store, counters, tx, revision: revisionRef, live: liveRef, ctx };
+  return { service, scope, t, clock, intent, store, counters, tx, revision: revisionRef, live: liveRef, ctx, calls };
 }
 
 const errCode = async (p) => (await p.then(() => null, (e) => e.code));
@@ -351,4 +361,75 @@ test("快照过期淘汰：TTL 过后的快照在下次 preview 入口被清扫�
   h.t.now += 10 * 60 * 1000 + 1; // 全部过期
   await h.service.preview({ operation: "manage" }); // 入口清扫 + 新建 1 个
   assert.equal(h.service.snapshotCount(), 1, "过期快照被清扫，不随预览次数累积");
+});
+
+// ---- v1.2.21：账号证据自动续期（ephemeral）＋reason 分型（计划 Task 2）----
+
+function seedCache(h, { ids = ["keep-1", "new-1", "new-2"], ageMs = 60_000 } = {}) {
+  mkdirSync(h.scope.dataDir, { recursive: true });
+  writeFileSync(join(h.scope.dataDir, "account-model-cache.json"), JSON.stringify({
+    ids, fetchedAt: new Date(h.t.now - ageMs).toISOString(), intentVersion: h.intent.version,
+  }));
+}
+
+test("证据自愈：过期 tid＋refresh＋heal ok → live；二次 preview 复用 ephemeral 不再打 v2/token", async () => {
+  const h = makeHarness({ record: { payload: { access: EXPIRED_TOKEN, refresh: "ghu-test", availableModelIds: ["keep-1"] } } });
+  const p = await h.service.preview({ operation: "manage", selectedIds: ["keep-1", "new-1"] });
+  assert.equal(p.evidence.source, "live");
+  assert.equal(p.evidence.reason, null);
+  const modelCall = h.calls.find((c) => c.url.endsWith("/models"));
+  assert.equal(modelCall.auth, "Bearer tid=9;exp=999999;", "live GET 使用续期所得新 tid");
+  assert.equal(h.counters.token, 1);
+  const p2 = await h.service.preview({ operation: "manage", selectedIds: ["keep-1", "new-1"] });
+  assert.equal(p2.evidence.source, "live");
+  assert.equal(h.counters.token, 1, "ephemeral 未过期 → 复用，不打续期");
+  assert.equal(h.ctx.credentials.writeRecord, undefined, "结构守卫：本插件对凭据库无写原语");
+});
+
+test("证据自愈：过期 tid 无 refresh → cache 证据 reason=access-expired，零续期调用", async () => {
+  const h = makeHarness({ record: { payload: { access: EXPIRED_TOKEN } } });
+  seedCache(h);
+  const p = await h.service.preview({ operation: "manage" });
+  assert.equal(p.evidence.source, "cache");
+  assert.equal(p.evidence.reason, "access-expired");
+  assert.equal(h.counters.token, 0);
+});
+
+test("证据自愈：heal 401 → reason=token-rejected；负缓存期内不重试，6 分钟后解封", async () => {
+  const h = makeHarness({ heal: "reject", record: { payload: { access: EXPIRED_TOKEN, refresh: "ghu-test" } } });
+  seedCache(h);
+  const p1 = await h.service.preview({ operation: "manage" });
+  assert.equal(p1.evidence.source, "cache");
+  assert.equal(p1.evidence.reason, "token-rejected");
+  assert.equal(h.counters.token, 1);
+  const p2 = await h.service.preview({ operation: "manage" });
+  assert.equal(p2.evidence.reason, "token-rejected");
+  assert.equal(h.counters.token, 1, "负缓存期内不再尝试续期");
+  h.t.now += 6 * 60 * 1000;
+  const p3 = await h.service.preview({ operation: "manage" });
+  assert.equal(p3.evidence.reason, "token-rejected");
+  assert.equal(h.counters.token, 2, "负缓存解封后重新尝试");
+});
+
+test("证据自愈：heal 网络失败 → reason=network", async () => {
+  const h = makeHarness({ heal: "netfail", record: { payload: { access: EXPIRED_TOKEN, refresh: "ghu-test" } } });
+  seedCache(h);
+  const p = await h.service.preview({ operation: "manage" });
+  assert.equal(p.evidence.source, "cache");
+  assert.equal(p.evidence.reason, "network");
+});
+
+test("证据自愈：未过期 tid → 不打续期", async () => {
+  const h = makeHarness();
+  await h.service.preview({ operation: "manage" });
+  assert.equal(h.counters.token, 0);
+});
+
+test("reason 分型：未过期 tid 但 models 401 → token-rejected；models 500 → network", async () => {
+  const h1 = makeHarness({ live: "fail" });
+  const p1 = await h1.service.preview({ operation: "manage" });
+  assert.equal(p1.evidence.reason, "token-rejected");
+  const h2 = makeHarness({ live: "500" });
+  const p2 = await h2.service.preview({ operation: "manage" });
+  assert.equal(p2.evidence.reason, "network");
 });
