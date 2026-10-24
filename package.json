@@ -61,6 +61,9 @@
     "yaml": "^2.5.0"
   },
   "dsh": {
+    "engines": {
+      "dsh": ">=0.1.7-rc.2"
+    },
     "bundle": {
       "patch": "./cordis.patch.yml"
     },

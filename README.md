@@ -3,7 +3,7 @@
 [![npm](https://img.shields.io/npm/v/%40inventec%2Fdsh-copilot-auth?label=npm)](https://www.npmjs.com/package/@inventec/dsh-copilot-auth)
 [![CI](https://img.shields.io/github/actions/workflow/status/iasiv5/dsh-copilot-auth/ci.yml?branch=main&label=CI)](https://github.com/iasiv5/dsh-copilot-auth/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/iasiv5/dsh-copilot-auth?label=License)](https://github.com/iasiv5/dsh-copilot-auth/blob/main/LICENSE)
-[![DSH](https://img.shields.io/badge/DSH-0.1.7--rc.2%20%7C%200.2.0--rc.1%2Frc.2%20verified-2563eb)](#版本兼容)
+[![DSH](https://img.shields.io/badge/DSH-0.2.1--rc.3%20verified-2563eb)](#版本兼容)
 
 为 DSH（DeepSeek Harness）内置的 GitHub Copilot 通道补上**网页设备码登录 / 注销**入口，预置开箱即用的 Copilot 提供方路由，并提供**模型列表管理**。用公司 GitHub 账号（带 Copilot 订阅）登录 DSH 的方式与其他 Copilot 客户端一致：**网页 + 设备码**，全程不填 API Token。
 
@@ -79,7 +79,7 @@ pi-ai 的模型目录是打包时硬编码的 JSON：上游新增模型在本机
 
 | 插件线 | DSH 实测版本 | 说明 |
 |---|---|---|
-| **v1.2.x** | `0.1.7-rc.2` ～ `0.2.0-rc.2` | 当前线；`0.2.0` 起注意插件 peer 精确版本守卫 |
+| **v1.2.x** | `0.1.7-rc.2`、`0.2.0-rc.1/rc.2`、`0.2.1-rc.2/rc.3` | 当前线；`0.2.0` 起注意插件 peer 精确版本守卫；rc.3 Web 冒烟：`/copilot-auth/status` 200、`activated=true`、`settingsNotServed=[]`、`lastError=null` |
 | v1.1.x | `0.1.2-rc.1` ～ `0.1.5-rc.2` | 旧版线；依赖 v1.2.0 已移除的 authorization 挂载补丁，新版 DSH 上无法激活 |
 
 逐版本沿革（v1.2.0 ～ v1.2.20 完整说明与已移除能力的语义记录）见 [docs/CHANGELOG.md](./docs/CHANGELOG.md)。
@@ -120,7 +120,7 @@ base 模型（GPT-4o / 4.1 一类）不耗 premium requests；premium 模型（C
 - 自行 patch `llm-pi-ai` 整段 config 会覆盖预置路由；`settings.yaml` 的 `llm-pi-ai:` 节只能稀疏覆盖字段，无法删除预置路由本身（移除须卸载本插件）
 - 路由前缀 `/copilot-auth` 两侧硬编码，不可配置
 - 模型目录「**只增不更新**」：合并只补充本机从未见过的条目，上游对已有 id 的元数据修正不会同步（ADR 0001）
-- DSH rc 版本耦合：实测 `0.1.7-rc.2` 与 `0.2.0-rc.1 / rc.2`，peer 仅 `@deepseek-ai/cordis@^4.0.2`
+- DSH rc 版本耦合：实测 `0.1.7-rc.2`、`0.2.0-rc.1/rc.2` 与 `0.2.1-rc.2/rc.3`；rc.3 Web 冒烟见「版本兼容」，peer 仅 `@deepseek-ai/cordis@^4.0.2`
 - DSH 升级后的目录自愈仅在 pi-ai 基线版本不变时按已确认条目只增重放；跨基线且条目缺失时上报 `self-heal-incompatible`，不修改安装树（重新执行一次手动刷新即可在新基线上激活）
 - 并发保护为宿主单进程内 mutex，不支持多实例 / 多进程并发操作同一安装目录
 - 目录 fsync 仅在 POSIX 执行：Windows 无目录 fsync 语义（必然 `EPERM`），直接跳过，一致性由 NTFS 元数据日志保证（v1.2.3 起）
