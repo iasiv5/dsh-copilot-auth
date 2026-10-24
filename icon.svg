@@ -1,0 +1,18 @@
+<svg width="36" height="36" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="dsh-copilot-auth">
+  <!-- dsh-copilot-auth 认证：斜向钥匙（环尾含青色轴点）= 设备码登录与凭据入库 -->
+  <circle cx="12.5" cy="12.5" r="6" stroke="url(#b)" stroke-width="4" fill="none"/>
+  <circle cx="12.5" cy="12.5" r="2.2" fill="url(#t)"/>
+  <path d="M17 17L27.5 27.5" stroke="url(#b)" stroke-width="4" stroke-linecap="round"/>
+  <path d="M24 24L27.5 20.5" stroke="url(#b)" stroke-width="3.4" stroke-linecap="round"/>
+  <path d="M27.5 27.5L31 24" stroke="url(#b)" stroke-width="3.4" stroke-linecap="round"/>
+  <defs>
+    <linearGradient id="b" x1="6.5" y1="6.5" x2="31" y2="27.5" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#69B9FF"/>
+      <stop offset="1" stop-color="#324DE2"/>
+    </linearGradient>
+    <linearGradient id="t" x1="10.3" y1="10.3" x2="14.7" y2="14.7" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#45E7A4"/>
+      <stop offset="1" stop-color="#05909D"/>
+    </linearGradient>
+  </defs>
+</svg>
