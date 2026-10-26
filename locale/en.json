@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "GitHub Copilot Authorization (@inventec/dsh-copilot-auth)",
+    "description": "Device-code sign-in and model catalog management for GitHub Copilot subscription accounts."
+  }
+}
