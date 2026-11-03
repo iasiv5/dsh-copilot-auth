@@ -3,8 +3,9 @@
 // 状态：idle → previewing → confirming（勾选→materialize 循环；缓存证据＋删除提案时
 // 自动 live 升级：闩锁、硬失败回退 materialize、软降级置 staleNotice）→ applying →
 // result / pendingRestart / checking / busy / resultUnknown；recovery-needed 经
-// retireConfirm → retiring → 重新预览闭环；busy 态在 active.phaseResult.status ===
-// "recovery-needed" 时同样提供 retire 出口（032），水合时该判据优先于旧 lastResult
+// retireConfirm → retiring → 重新预览闭环；busy 态在 active.phaseResult.status 为
+// "recovery-needed"（032）或 "pending-restart"（ADR-0006/v1.2.25：放弃等待重启）时
+// 同样提供 retire 出口，水合时 recovery-needed 判据优先于旧 lastResult
 // （防旧 "applied" 遮蔽卡死操作），retire 失败回 busy 可重试。
 // 关键规则：
 //  - 勾选集合即终态；选择变化经 basePreviewId 从原快照 materialize（不重新取数）
@@ -110,8 +111,9 @@ export function reduce(state, event) {
       if (event.type === "retire-request" && state.name === "result") {
         return [{ name: "retireConfirm", result: state.result }, null];
       }
-      // 032：busy 态的 retire 出口——仅当卡死操作已 recovery-needed（静止核实后清，绝不写配置）
-      if (event.type === "retire-request" && state.name === "busy" && state.active?.phaseResult?.status === "recovery-needed") {
+      // 032 + ADR-0006：busy 态的 retire 出口——卡死操作（recovery-needed）与挂起重启的
+      // 操作（pending-restart）都可放弃（静止核实后清，绝不写配置）；文案由渲染层按态区分
+      if (event.type === "retire-request" && state.name === "busy" && ["recovery-needed", "pending-restart"].includes(state.active?.phaseResult?.status ?? "")) {
         return [{ name: "retireConfirm", active: state.active }, null];
       }
       if (event.type === "dismiss" && state.name === "failed") {

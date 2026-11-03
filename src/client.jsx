@@ -97,6 +97,10 @@ const DICTS = {
     retireBtn: "End previous configuration intent",
     retireTitle: "End previous configuration intent",
     retireConfirmText: "End the intent only; existing changes are not rolled back or undone.",
+    busyPendingRestart: "The previous change is saved and takes effect after restart. New changes cannot be applied until then — wait for the restart, or discard that change.",
+    retireBtnPending: "Discard the pending change",
+    retireConfirmPending: "Discarding drops this pending change; catalog data already written is kept. Preview and apply again afterwards.",
+    retiredByAuth: "Authorization changed (sign-in or sign-out) and the in-flight model configuration change was discarded. Preview and apply again.",
     legacy: "Legacy shared recovery state was found. It will not be applied automatically; preview and confirm in this profile.",
     techDetails: "Technical details",
     stateCorrupt: "State file was corrupted and quarantined. Preview and confirm again.",
@@ -188,6 +192,10 @@ const DICTS = {
     retireBtn: "结束旧配置意图",
     retireTitle: "结束旧配置意图",
     retireConfirmText: "只结束旧意图，不回滚或撤销已发生的更改。",
+    busyPendingRestart: "上一次更改已保存、待重启生效；重启前无法应用新的更改。可等待重启，或放弃该次更改。",
+    retireBtnPending: "放弃待重启的更改",
+    retireConfirmPending: "放弃后，本次待重启的更改将被丢弃；已落盘的目录数据保留，之后可重新预览并应用。",
+    retiredByAuth: "授权状态已变化（登录或退出登录），进行中的模型配置更改已作废；请重新预览并应用。",
     legacy: "检测到旧的共享恢复状态。不会自动应用，请在当前 profile 重新预览确认。",
     techDetails: "技术详情",
     stateCorrupt: "恢复状态无法读取，原件已保留。请重新预览确认。",
@@ -525,21 +533,25 @@ function RefreshModal({ t, flow, onSelect, onConfirm, onCancel, onOverlay }) {
 
 // 「结束旧配置意图」确认弹窗（T11/B17b 简化版）：默认焦点在取消；Esc 取消；
 // 只结束旧意图，不回滚或撤销已发生的更改。
-function RetireDialog({ t, onConfirm, onCancel }) {
+function RetireDialog({ t, onConfirm, onCancel, pending = false }) {
   const cancelRef = useRef(null);
   const surface = useRef(null);
   if (!surface.current) surface.current = sampleThemeSurface();
   useEffect(() => {
     cancelRef.current?.focus();
   }, []);
+  // pending（ADR-0006）：放弃的是「待重启的更改」，标题/正文/按钮文案与 recovery-needed 区分
+  const titleKey = pending ? "retireBtnPending" : "retireTitle";
+  const bodyKey = pending ? "retireConfirmPending" : "retireConfirmText";
+  const btnKey = pending ? "retireBtnPending" : "retireBtn";
   return (
     <div style={styles.modalMask} role="dialog" aria-modal="true" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}>
       <div style={{ ...styles.modal, background: surface.current.bg, color: surface.current.fg, maxWidth: 420 }}>
-        <h4 style={styles.modalTitle}>{t("retireTitle")}</h4>
-        <p style={styles.modalText}>{t("retireConfirmText")}</p>
+        <h4 style={styles.modalTitle}>{t(titleKey)}</h4>
+        <p style={styles.modalText}>{t(bodyKey)}</p>
         <div style={styles.modalActions}>
           <button ref={cancelRef} type="button" style={{ ...styles.button, ...styles.secondary }} onClick={onCancel}>{t("cancel")}</button>
-          <button type="button" style={{ ...styles.button, ...styles.primary }} onClick={onConfirm}>{t("retireBtn")}</button>
+          <button type="button" style={{ ...styles.button, ...styles.primary }} onClick={onConfirm}>{t(btnKey)}</button>
         </div>
       </div>
     </div>
@@ -763,12 +775,12 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
             <p style={styles.banner}>⚠ {t("pendingRestart")}</p>
           )}
           {flow.name === "busy" && (
-            <p style={styles.banner}>ⓘ {t("busy")}{flow.retireError ? `（${flow.retireError}）` : ""}</p>
+            <p style={styles.banner}>ⓘ {flow.active?.phaseResult?.status === "pending-restart" ? t("busyPendingRestart") : t("busy")}{flow.retireError ? `（${flow.retireError}）` : ""}</p>
           )}
-          {flow.name === "busy" && flow.active?.phaseResult?.status === "recovery-needed" && (
+          {flow.name === "busy" && ["recovery-needed", "pending-restart"].includes(flow.active?.phaseResult?.status ?? "") && (
             <div>
               <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={() => drive({ type: "retire-request" })}>
-                {t("retireBtn")}
+                {flow.active?.phaseResult?.status === "pending-restart" ? t("retireBtnPending") : t("retireBtn")}
               </button>
             </div>
           )}
@@ -784,7 +796,11 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
             <div>
               {(() => {
                 const st = flow.result?.status;
-                const key = {
+                // ADR-0006：授权动作即时作废的操作，给精确原因文案而非泛化的 recoveryNeeded
+                const retiredByAuth = st === "intent-retired"
+                  && typeof flow.result?.error === "string"
+                  && flow.result.error.startsWith("superseded-by-auth-action:");
+                const key = retiredByAuth ? "retiredByAuth" : {
                   applied: "applied",
                   conflict: "conflict",
                   partial: "partial",
@@ -832,6 +848,7 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
       {flow.name === "retireConfirm" && (
         <RetireDialog
           t={t}
+          pending={flow.active?.phaseResult?.status === "pending-restart"}
           onConfirm={() => drive({ type: "retire-confirm" })}
           onCancel={() => drive({ type: "cancel" })}
         />

@@ -457,12 +457,21 @@ test("032 用例 C busy retire 闭环：确认携 active.operationId；retire-ok
   assert.equal(s2b.active.operationId, "op-stuck");
 });
 
-test("032 用例 D 判据外不出口＋cancel 回 busy：非 recovery-needed 无 retire；busy 入口 cancel 不落空 result", () => {
-  const busyOther = { ...initial, name: "busy", active: { operationId: "op-x", phaseResult: { status: "pending-restart" } } };
+test("032 用例 D 判据外不出口＋cancel 回 busy（ADR-0006 修订：pending-restart 已入出口集，守卫改挂其他态）", () => {
+  const busyOther = { ...initial, name: "busy", active: { operationId: "op-x", phaseResult: { status: "verified" } } };
   const s1 = reduce(busyOther, { type: "retire-request" })[0];
-  assert.equal(s1.name, "busy", "非 recovery-needed 不给 retire 出口");
+  assert.equal(s1.name, "busy", "出口集（recovery-needed/pending-restart）之外的态不给 retire");
   const confirmFromBusy = { name: "retireConfirm", active: STUCK_ACTIVE };
   const s2 = reduce(confirmFromBusy, { type: "cancel" })[0];
   assert.equal(s2.name, "busy", "busy 入口 cancel 回 busy");
   assert.equal(s2.active.operationId, "op-stuck");
+});
+
+// ---- v1.2.25：ADR-0006 pending-restart busy 出口（放弃等待重启，不必动 API）----
+
+test("ADR-0006 用例 E：busy + pending-restart → retire-request 进 retireConfirm（携 active）", () => {
+  const busyPending = { ...initial, name: "busy", active: { operationId: "op-pending", phase: "catalog-landed", phaseResult: { status: "pending-restart" } } };
+  const s = reduce(busyPending, { type: "retire-request" })[0];
+  assert.equal(s.name, "retireConfirm", "pending-restart 现在享有 busy 出口（v1.2.21 用例 D 的旧决策被 ADR-0006 推翻）");
+  assert.equal(s.active.operationId, "op-pending");
 });
