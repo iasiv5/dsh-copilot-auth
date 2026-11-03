@@ -602,7 +602,12 @@ export function apply(ctx, opts = {}) {
         activated: st?.activated === true,
         activeOperation: st?.activeOperation ?? null,
         lastResult: st?.lastResult ?? null,
-        pendingRestart: !!st?.restartState || st?.activeOperation?.phaseResult?.status === "pending-restart",
+        // 评审 Q4（ADR-0006）：作废（intent-retired）后内核 restartState 残留不得再宣称
+        // 「待重启生效」——activeOperation 已清、无任何待提交配置，重启不再完成任何更改；
+        // 正常 pending-restart（lastResult 非 intent-retired）行为不变，水合判序零改动
+        pendingRestart: (st?.activeOperation == null && st?.lastResult?.status === "intent-retired")
+          ? false
+          : (!!st?.restartState || st?.activeOperation?.phaseResult?.status === "pending-restart"),
         legacyStateDetected: loaded.flags.legacyStateDetected === true,
         stateUnknownVersion: loaded.flags.unknownVersion === true,
         piAiVersion: installInfo?.version ?? null,

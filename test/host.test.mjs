@@ -634,3 +634,37 @@ test("方法守卫：GET 打 POST 路由 / POST 打 GET 路由 → 405 method no
   assert.equal((await call(handler(ctx, "/status"), { method: "POST" })).code, 405);
   assert.equal((await call(handler(ctx, "/refresh/apply"), { method: "GET" })).code, 405);
 });
+
+test("评审 Q4：作废（intent-retired）后 restartState 残留 → /status pendingRestart=false；正常 pending-restart 行为不变", async () => {
+  const plantState = (extra) => JSON.stringify({
+    version: 2, profileId: "test",
+    activated: true, appliedOverlay: {}, appliedProvenance: null, intentVersion: 3,
+    activeOperation: null,
+    restartState: { reason: "refresh", expectedEntriesDigest: "abc", since: "2026-11-03T00:00:00.000Z" },
+    lastError: null, lastErrorAt: null,
+    ...extra,
+  });
+  // 作废态：activeOperation 已清 + lastResult=intent-retired，但内核 restartState 残留
+  const ctx = makeCtx();
+  ctx.script.record = { "llm-pi-ai/github-copilot": { kind: "grant" } };
+  const dataDir = join(ctx.profileContext.dir, "copilot-auth");
+  mkdirSync(dataDir, { recursive: true });
+  writeFileSync(join(dataDir, "refresh-state.json"), plantState({
+    lastResult: { operationId: "op-1", status: "intent-retired", phase: "catalog-landed", drift: true, changes: null, error: "superseded-by-auth-action:logout" },
+  }));
+  const status = await call(handler(ctx, "/status"));
+  assert.equal(status.body.refresh.pendingRestart, false, "作废后不再宣称待重启生效（评审 Q4）");
+  assert.equal(status.body.refresh.activeOperation, null);
+  assert.equal(status.body.refresh.lastResult?.status, "intent-retired");
+
+  // 对照组：目录-only 正常 pending-restart（lastResult 非 intent-retired）→ 行为不变
+  const ctx2 = makeCtx();
+  ctx2.script.record = { "llm-pi-ai/github-copilot": { kind: "grant" } };
+  const dataDir2 = join(ctx2.profileContext.dir, "copilot-auth");
+  mkdirSync(dataDir2, { recursive: true });
+  writeFileSync(join(dataDir2, "refresh-state.json"), plantState({
+    lastResult: { operationId: "op-2", status: "pending-restart", phase: "catalog-landed", changes: { catalogAdded: 1, modelsAdded: 0, modelsRemoved: 0 }, error: null },
+  }));
+  const status2 = await call(handler(ctx2, "/status"));
+  assert.equal(status2.body.refresh.pendingRestart, true, "正常 pending-restart（待重启加载目录）不受守卫影响");
+});

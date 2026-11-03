@@ -157,3 +157,12 @@ client.jsx（P0，构建产物 lib/client.js 随包发布）
 2. `npm run build` 产物含全部新文案键（grep 断言）。
 3. 发版链：tag → OIDC run 绿 → npmjs 直查 1.2.25 → `dshm_upgrade` 装机 → 分离式重启 → status 四项全绿 + 指纹探针命中 + GUI 冒烟通过。
 4. know-how 032 §6 收编标注完成。
+
+## 评审修订记录（评审 Agent 多轮往来沉淀，2026-11-03）
+
+- Q1（建议→采纳方案 a）：Task 6 CHANGELOG 条目取消——矩阵封存于 v1.2.20，1.2.21 起沿革由 README「版本兼容」+ chore(release) commit message 承载（commit 0f5b791）。
+- Q2（建议→采纳）：Task 4 断言 `superseded-by-auth-action` 计数 ≥2 修正为 =1（一处 startsWith 前缀匹配覆盖 auth-start/logout 全部受控取值，原为计划数字错误）（commit 0f5b791）。
+- Q3（重要→已修复）：invalidate 映射以 `idempotent !== true` 守卫——真内核在无 active 且 lastResult 为空时经 `undefined===undefined` 误入幂等分支，原实现虚报 invalidated:true；内核 retire 语义零改动，TX_RETIRE_UNDEFINED_OP 钉例防漂移，service mock 补齐幂等分支消除假绿（commit c0e4103）。
+- Q4（重要→已修复，组装层）：作废/放弃后内核 restartState 残留使 /status pendingRestart 恒真、刷新后水合落 pendingRestart 态遮蔽作废事实——host.mjs /status 组装处对「activeOperation==null 且 lastResult.status=intent-retired」置 pendingRestart=false；正常 pending-restart 与水合判序（约束 3）零改动；host 正反两态测试 + flow 用例 F（本提交）。
+- V6 备注：计划「文件结构与职责」表漏列 src/refresh-flow.mjs（Task 4 machine 改动实际落点），实现正确、计划表笔误，随本节补记。
+- Q5（建议→待主人决策，未实施）：pendingRestart 态（apply-ok 主路径落点与水合落点）渲染层无放弃出口，放弃须经「重新预览 → apply 撞 423 → busy」迂回；README L67-68 已按「未实施」口径如实改写。属设计覆盖面扩展（约束 4 允许扩展既有按钮可见条件），交主人裁定是否列入后续版本。

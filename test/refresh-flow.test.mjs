@@ -475,3 +475,14 @@ test("ADR-0006 用例 E：busy + pending-restart → retire-request 进 retireCo
   assert.equal(s.name, "retireConfirm", "pending-restart 现在享有 busy 出口（v1.2.21 用例 D 的旧决策被 ADR-0006 推翻）");
   assert.equal(s.active.operationId, "op-pending");
 });
+
+test("ADR-0006 用例 F（评审 Q4 闭环）：作废后 /status pendingRestart=false 的水合 → result 态如实呈现", () => {
+  const s = reduce(initial, { type: "hydrate", status: { refresh: {
+    scopeAvailable: true, catalogMode: "file", pendingRestart: false,
+    lastResult: { operationId: "op-retired", status: "intent-retired", error: "superseded-by-auth-action:logout" },
+    activeOperation: null,
+  } } })[0];
+  assert.equal(s.name, "result", "不再被 restartState 残留诱导进 pendingRestart 态遮蔽作废事实");
+  assert.equal(s.result?.status, "intent-retired");
+  assert.equal(s.result?.error, "superseded-by-auth-action:logout");
+});
