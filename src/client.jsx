@@ -776,7 +776,7 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
           {flow.name === "pendingRestart" && (
             <>
               <p style={styles.banner}>⚠ {t("pendingRestart")}{flow.retireError ? `（${flow.retireError}）` : ""}</p>
-              {flow.result?.operationId && (
+              {(flow.active?.operationId || (flow.result?.status === "pending-restart" && flow.result?.operationId)) && (
                 <div>
                   <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={() => drive({ type: "retire-request" })}>
                     {t("retireBtnPending")}

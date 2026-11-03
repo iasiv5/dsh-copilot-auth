@@ -517,3 +517,36 @@ test("Q5 用例 H：cancel 回 pendingRestart；retire-fail 回 pendingRestart �
   const noId = reduce({ ...initial, name: "pendingRestart", result: null }, { type: "retire-request" })[0];
   assert.equal(noId.name, "pendingRestart", "无 result.operationId 不给出口");
 });
+
+// ---- v1.2.25：评审 Q6 跨会话水合落点（active 携带 + active 优先）----
+
+test("Q6 用例 I：跨会话水合（active 占用 + 旧 applied lastResult）→ 放弃按 active.operationId 成功闭环", async () => {
+  const f = makeFetch();
+  const s0 = reduce(initial, { type: "hydrate", status: { refresh: {
+    scopeAvailable: true, catalogMode: "file", pendingRestart: true,
+    lastResult: { operationId: "op-old", status: "applied", changes: { modelsAdded: 2 } },
+    activeOperation: { operationId: "op-new", phase: "catalog-landed", phaseResult: { status: "pending-restart" } },
+  } } })[0];
+  assert.equal(s0.name, "pendingRestart");
+  assert.equal(s0.active?.operationId, "op-new", "水合落点携带真实占用操作（评审 Q6 修复前为 undefined）");
+  const s1 = reduce(s0, { type: "retire-request" })[0];
+  assert.equal(s1.name, "retireConfirm", "active 在场即有出口");
+  assert.equal(s1.active.operationId, "op-new");
+  f.respond(R, { body: { ok: true, result: { operationId: "op-new", status: "intent-retired", error: null } } });
+  f.respond(S, { body: { refresh: { scopeAvailable: true, catalogMode: "file", pendingRestart: false, lastResult: { operationId: "op-new", status: "intent-retired", error: null }, activeOperation: null } } });
+  const s2 = await advance(s1, { type: "retire-confirm" }, f);
+  assert.equal(f.bodies.find((x) => x.url === R)?.body.operationId, "op-new", "operationId 取 active（修复前误用旧 lastResult 的 op-old → operation-mismatch）");
+  assert.equal(s2.name, "result", "放弃成功经 status 水合落 result（pendingRestart=false 为 Q4 守卫配合项）");
+  assert.equal(s2.result?.status, "intent-retired");
+});
+
+test("Q6 用例 J：终态残留组合（active=null + lastResult=conflict + restartState 残留）→ 无放弃出口", () => {
+  const s0 = reduce(initial, { type: "hydrate", status: { refresh: {
+    scopeAvailable: true, catalogMode: "file", pendingRestart: true,
+    lastResult: { operationId: "op-c", status: "conflict", error: "settings-conflict: configuration changed since preview" },
+    activeOperation: null,
+  } } })[0];
+  assert.equal(s0.name, "pendingRestart", "宿主 pendingRestart=true 组合仍落 pendingRestart（1.2.21 既有语义，台账 Q6 仅备注不扩修）");
+  const s1 = reduce(s0, { type: "retire-request" })[0];
+  assert.equal(s1.name, "pendingRestart", "终态残留（result 非 pending-restart、无 active）不给放弃出口");
+});

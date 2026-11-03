@@ -116,10 +116,12 @@ export function reduce(state, event) {
       if (event.type === "retire-request" && state.name === "busy" && ["recovery-needed", "pending-restart"].includes(state.active?.phaseResult?.status ?? "")) {
         return [{ name: "retireConfirm", active: state.active }, null];
       }
-      // ADR-0006/v1.2.25（Q5，主人裁定并入）：pendingRestart 态主视图的放弃出口——
-      // 走 result 入口（携 result.operationId），免去「重新预览→apply 撞 423→busy」迂回
-      if (event.type === "retire-request" && state.name === "pendingRestart" && state.result?.operationId) {
-        return [{ name: "retireConfirm", result: state.result }, null];
+      // ADR-0006/v1.2.25（Q5 + Q6）：pendingRestart 态主视图的放弃出口——优先取 active
+      // （真实占用操作，跨会话水合落点），result 兜底仅认 pending-restart 终态（排除旧
+      // lastResult 残影与终态残留的误导出口）
+      if (event.type === "retire-request" && state.name === "pendingRestart"
+          && (state.active?.operationId || (state.result?.status === "pending-restart" && state.result?.operationId))) {
+        return [{ name: "retireConfirm", result: state.result, active: state.active ?? null }, null];
       }
       if (event.type === "dismiss" && state.name === "failed") {
         return [{ ...initial, flags: state.flags }, null];
@@ -134,7 +136,9 @@ export function reduce(state, event) {
           return [{ ...base, name: "busy", active: refresh.activeOperation }, null];
         }
         if (restartStates.has(refresh?.lastResult?.status ?? "") || refresh?.pendingRestart === true) {
-          return [{ ...base, name: "pendingRestart", result: refresh.lastResult }, null];
+          // 评审 Q6：水合落点必须携带 active（真实占用操作的 operationId）——lastResult 可能是
+          // 旧操作残影（如旧 applied），放弃出口若取旧 id 会 operation-mismatch 永远失败
+          return [{ ...base, name: "pendingRestart", result: refresh.lastResult, active: refresh.activeOperation ?? null }, null];
         }
         const st = refresh?.lastResult?.status;
         if (st && ["recovery-needed", "rollback-conflict", "conflict", "partial", "rolled-back", "intent-retired", "applied"].includes(st)) {
@@ -288,8 +292,10 @@ export function reduce(state, event) {
     }
     case "retireConfirm": {
       if (event.type === "retire-confirm") {
-        // 双入口：result 入口携 result；busy 入口（032）携 active——operationId 二选一
-        return [{ name: "retiring", operationId: state.result?.operationId ?? state.active?.operationId, result: state.result, active: state.active }, { type: "retire", operationId: state.result?.operationId ?? state.active?.operationId }];
+        // 双入口：busy/pendingRestart 入口携 active（真实占用操作——Q6 起 active 优先，
+        // 防 lastResult 残影 id 造成 operation-mismatch）；result 入口携 result
+        const retireId = state.active?.operationId ?? state.result?.operationId;
+        return [{ name: "retiring", operationId: retireId, result: state.result, active: state.active }, { type: "retire", operationId: retireId }];
       }
       if (event.type === "cancel") {
         // Q5：pendingRestart 入口取消回 pendingRestart（携待重启横幅），不落进无提示的 result 空态
