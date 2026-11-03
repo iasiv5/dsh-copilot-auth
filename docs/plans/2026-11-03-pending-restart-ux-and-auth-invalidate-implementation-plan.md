@@ -83,8 +83,8 @@ client.jsx（P0，构建产物 lib/client.js 随包发布）
 ### Task 2：`refresh-service.invalidateForAuthAction`
 
 - 文件：`src/refresh-service.mjs`
-- 动作：新增 `async function invalidateForAuthAction(source)`：`requireDeps()`；`source` 不在 `["auth-start","logout"]` → `throw flowError("INVALID_SOURCE", "invalid invalidate source")`；`return queue(async () => { const res = await transaction.retire({ operationId: undefined, reason: \`superseded-by-auth-action:${source}\` }); return res?.ok ? { ok:true, invalidated:true, result: res.result } : { ok:true, invalidated:false }; })`。加入 `return { … }` 导出表。
-- 注意：`operationId` 恒传 `undefined`（transaction.retire 的既有语义＝终结当前 activeOperation，无 active 时返回 `{ok:false,error:"not-active"}`）——service 层不需要读 state，也不需要校验归属；invalidate 的语义本来就是「终结当前谁在 active」。
+- 动作：新增 `async function invalidateForAuthAction(source)`：`requireDeps()`；`source` 不在 `["auth-start","logout"]` → `throw flowError("INVALID_SOURCE", "invalid invalidate source")`；`return queue(async () => { const res = await transaction.retire({ operationId: undefined, reason: \`superseded-by-auth-action:${source}\` }); return res?.ok && res?.idempotent !== true ? { ok:true, invalidated:true, result: res.result } : { ok:true, invalidated:false }; })`。加入 `return { … }` 导出表。
+- 注意（评审 Q3 修订）：真内核 retire 在无 active 且 lastResult 为空时会经 `lastResult.operationId === undefined` 误入 idempotent 分支返回 `{ok:true,idempotent:true,result:null}`——故 invalidate 的映射必须以 `idempotent !== true` 守卫，该情形映射为 `invalidated:false`（没有任何操作被终结，不虚报契约语义）；内核 retire 语义零改动（全局约束 1），内核怪癖由 TX_RETIRE_UNDEFINED_OP 钉例防漂移。`operationId` 恒传 `undefined`（transaction.retire 的既有语义＝终结当前 activeOperation）——service 层不需要读 state，也不需要校验归属。
 - 验证：`node --test test/refresh-service.test.mjs`；新增两用例：①有 activeOperation（用既有夹具构造）→ `invalidated:true` 且 `/status` 的 `activeOperation` 为 null、`lastResult.error` 逐字匹配；②无 activeOperation → `invalidated:false` 且不抛。非法 source 用例断言抛 `INVALID_SOURCE`。
 - Consumes：Task 1 的 `retire({reason})`。Produces：`invalidateForAuthAction`（Task 3 接线消费）。
 

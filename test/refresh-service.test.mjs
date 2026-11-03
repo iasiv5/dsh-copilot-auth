@@ -89,9 +89,16 @@ function makeHarness({
     retire: async ({ operationId, reason }) => {
       tx.retireCalls.push(operationId);
       tx.retireReasons.push(reason);
-      // 忠实于真内核：无 active → not-active（invalidate 据此映射 invalidated:false）
+      // 忠实于真内核（评审 Q3 修订：补 idempotent 分支）——无 active 且
+      // lastResult.operationId === operationId 时返回 idempotent:true；
+      // operationId=undefined 且 lastResult 为空/缺 operationId 时 undefined===undefined 误命中，
+      // 与真内核 refresh-transaction.mjs retire 的行为逐字一致
       const st = stateIO.load();
-      if (!st?.activeOperation) return { ok: false, error: "not-active" };
+      if (!st?.activeOperation) {
+        const lr = st?.lastResult ?? null; // st 缺失视同 lastResult:null（对齐真内核 fresh 态与评审探针形态）
+        if (lr?.operationId === operationId) return { ok: true, idempotent: true, result: lr };
+        return { ok: false, error: "not-active" };
+      }
       return { ok: true, result: { status: "intent-retired", error: reason ?? null } };
     },
     bootRecover: async () => ({ ok: true }),
@@ -334,10 +341,16 @@ test("SERVICE_INVALIDATE：授权动作即时作废 active；无 active 幂等�
   assert.equal(h.tx.retireCalls.at(-1), undefined, "operationId 恒 undefined＝终结当前 active（清 activeOperation 是内核行为，TX_RETIRE 已覆盖）");
   assert.equal(h.tx.retireReasons.at(-1), "superseded-by-auth-action:logout");
 
-  // 无 active：幂等 no-op（不抛、不清 lastResult）
+  // 无 active：幂等 no-op（不抛、不清 lastResult）——含 Q3 回归：lastResult 为空的全新
+  // profile 在真内核会误入 idempotent 分支，invalidate 必须映射为 invalidated:false 而非虚报
   const h2 = makeHarness();
   const inv2 = await h2.service.invalidateForAuthAction("auth-start");
   assert.deepEqual(inv2, { ok: true, invalidated: false });
+
+  // lastResult 在场但无 active：显式 operationId 串 !== undefined → not-active → invalidated:false
+  const h3 = makeHarness();
+  h3.store.value = { activeOperation: null, lastResult: { operationId: "op-prev", status: "applied" } };
+  assert.deepEqual(await h3.service.invalidateForAuthAction("logout"), { ok: true, invalidated: false });
 
   // 非法 source：拒绝
   assert.equal(await errCode(h2.service.invalidateForAuthAction("nope")), "INVALID_SOURCE");

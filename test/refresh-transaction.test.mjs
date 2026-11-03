@@ -285,6 +285,20 @@ test("TX_RETIRE_REASON：retire 携带受控 reason → lastResult.error 逐字�
   assert.equal(r2.result.error, null);
 });
 
+test("TX_RETIRE_UNDEFINED_OP：无 active 且 lastResult 空 → operationId=undefined 误入 idempotent（内核既有语义，service 层补偿映射——评审 Q3）", async () => {
+  // 钉例：retire({operationId:undefined}) 在静止且无历史的全新状态下，
+  // 真内核经 lastResult.operationId(undefined) === undefined 误入幂等分支返回
+  // {ok:true, idempotent:true, result:null}。语义修订留给内核演进（全局约束 1 不动
+  // 既有 retire 语义），invalidateForAuthAction 在 service 层按 idempotent!==true
+  // 补偿映射为 invalidated:false——本钉例防内核行为漂移导致补偿失效而无感知。
+  const w = makeWorld();
+  const r = await w.makeTx().retire({ operationId: undefined, reason: "superseded-by-auth-action:logout" });
+  assert.equal(r.ok, true);
+  assert.equal(r.idempotent, true);
+  assert.equal(r.result, null);
+  assert.equal(w.stateIO.load().activeOperation, null, "静止态无操作可终结");
+});
+
 test("TX_SELF_HEAL：同基线且条目已在盘 → 幂等零写入", async () => {
   const w = makeWorld();
   writeFileSync(w.catalogFile, JSON.stringify({ ...BASE_CATALOG, "openai-completions": { ...BASE_CATALOG["openai-completions"], "new-1": NEW_ENTRY } }, null, 2) + "\n");

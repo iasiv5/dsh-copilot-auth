@@ -324,7 +324,12 @@ export function createRefreshService(ctx, {
     }
     if (!transaction) throw flowError("DEPS_MISSING", "transaction kernel not wired");
     const res = await queue(() => transaction.retire({ operationId: undefined, reason: `superseded-by-auth-action:${source}` }));
-    return res?.ok ? { ok: true, invalidated: true, result: res.result } : { ok: true, invalidated: false };
+    // 评审 Q3：真内核在无 active 且 lastResult 为空时会误入 idempotent 分支
+    // （lastResult.operationId 与 undefined 严格相等误命中），该情形下没有任何操作被
+    // 终结 → 映射 invalidated:false，不虚报契约语义；内核 retire 语义零改动（全局约束 1）。
+    return res?.ok && res?.idempotent !== true
+      ? { ok: true, invalidated: true, result: res.result }
+      : { ok: true, invalidated: false };
   }
 
   async function bootReady() {
