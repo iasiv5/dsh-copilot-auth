@@ -112,7 +112,7 @@ client.jsx（P0，构建产物 lib/client.js 随包发布）
   - machine：busy 态 `retire-request` 分支条件（源码内 `state.name === "busy" && state.active?.phaseResult?.status === "recovery-needed"`）扩展为 `|| … === "pending-restart"`。
   - result 态：`lastResult.status === "intent-retired"` 且 `lastResult.error` 以 `superseded-by-auth-action:` 为前缀时，结果消息渲染 `t("retiredByAuth")`（既有 intent-retired 其余形态渲染不变）。
 - 约束自查：不新增控件种类（仅既有横幅/按钮/弹窗的条件与文案）；水合判序零改动。
-- 验证：`npm run build` 成功；`grep -o "busyPendingRestart\|retireBtnPending\|retireConfirmPending\|retiredByAuth" lib/client.js | wc -l` ≥ 8（zh+en 各键）；`grep -o "superseded-by-auth-action" lib/client.js | wc -l` ≥ 2。真机视图验证列入 Task 7 E2E（不主动制造 pending-restart 状态，见最终验证）。
+- 验证：`npm run build` 成功；`grep -o "busyPendingRestart\|retireBtnPending\|retireConfirmPending\|retiredByAuth" lib/client.js | wc -l` ≥ 8（zh+en 各键）；`grep -o "superseded-by-auth-action" lib/client.js | wc -l` = 1（一处 `startsWith` 前缀匹配即覆盖 auth-start/logout 全部受控取值，语义完备——评审 Q2 修订：原「≥2」为计划数字错误）。真机视图验证列入 Task 7 E2E（不主动制造 pending-restart 状态，见最终验证）。
 - Consumes：无（纯前端分支）。Produces：无服务端依赖。
 
 ### Task 5：README 已知边界改写
@@ -123,7 +123,7 @@ client.jsx（P0，构建产物 lib/client.js 随包发布）
 
 ### Task 6：全量测试 + CHANGELOG + 版本三处同步
 
-- 动作：`node --test` 全量绿（记录用例总数，对照 1.2.24 的 224+ 基线只增不减）；`docs/CHANGELOG.md` 追加 1.2.25 条目（ADR-0006 + P0 两项 + README）；`package.json` 与 `package-lock.json`（根 + `packages.""`）同步 1.2.24→1.2.25（031：`grep '"version"' package.json package-lock.json | head -3` 三行同版本，不同步不 tag）。
+- 动作：`node --test` 全量绿（记录用例总数，对照 1.2.24 基线只增不减）；版本说明**不写** `docs/CHANGELOG.md`——该矩阵已封存于 v1.2.20（文件头自我声明），1.2.21 起发版说明由 `chore(release)` commit message 承载（仓库惯例，评审 Q1 裁定采纳）；`package.json` 与 `package-lock.json`（根 + `packages.""`）同步 1.2.24→1.2.25（031：`grep '"version"' package.json package-lock.json | head -3` 三行同版本，不同步不 tag）。
 - 验证：`node --test` 退出码 0；三处版本 grep 一致；`npm run build` 后 `git status` 中 lib/client.js 已更新。
 
 ### Task 7：发版、装机与端到端验证
