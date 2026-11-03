@@ -116,6 +116,11 @@ export function reduce(state, event) {
       if (event.type === "retire-request" && state.name === "busy" && ["recovery-needed", "pending-restart"].includes(state.active?.phaseResult?.status ?? "")) {
         return [{ name: "retireConfirm", active: state.active }, null];
       }
+      // ADR-0006/v1.2.25（Q5，主人裁定并入）：pendingRestart 态主视图的放弃出口——
+      // 走 result 入口（携 result.operationId），免去「重新预览→apply 撞 423→busy」迂回
+      if (event.type === "retire-request" && state.name === "pendingRestart" && state.result?.operationId) {
+        return [{ name: "retireConfirm", result: state.result }, null];
+      }
       if (event.type === "dismiss" && state.name === "failed") {
         return [{ ...initial, flags: state.flags }, null];
       }
@@ -286,16 +291,21 @@ export function reduce(state, event) {
         // 双入口：result 入口携 result；busy 入口（032）携 active——operationId 二选一
         return [{ name: "retiring", operationId: state.result?.operationId ?? state.active?.operationId, result: state.result, active: state.active }, { type: "retire", operationId: state.result?.operationId ?? state.active?.operationId }];
       }
-      if (event.type === "cancel") return state.active ? [{ name: "busy", active: state.active }, null] : [{ name: "result", result: state.result }, null];
+      if (event.type === "cancel") {
+        // Q5：pendingRestart 入口取消回 pendingRestart（携待重启横幅），不落进无提示的 result 空态
+        if (state.active) return [{ name: "busy", active: state.active }, null];
+        if (state.result?.status === "pending-restart") return [{ name: "pendingRestart", result: state.result }, null];
+        return [{ name: "result", result: state.result }, null];
+      }
       return [state, null];
     }
     case "retiring": {
       if (event.type === "retire-ok") return [{ ...state, name: "checking" }, { type: "status" }];
       if (event.type === "retire-fail") {
-        // 032：busy 入口失败回 busy 可重试；result 入口维持既有落点
-        return state.active
-          ? [{ name: "busy", active: state.active, retireError: event.error }, null]
-          : [{ name: "result", result: state.result, retireError: event.error }, null];
+        // 032：busy 入口失败回 busy 可重试；Q5：pendingRestart 入口失败回 pendingRestart 可重试；result 入口维持既有落点
+        if (state.active) return [{ name: "busy", active: state.active, retireError: event.error }, null];
+        if (state.result?.status === "pending-restart") return [{ name: "pendingRestart", result: state.result, retireError: event.error }, null];
+        return [{ name: "result", result: state.result, retireError: event.error }, null];
       }
       return [state, null];
     }

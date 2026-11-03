@@ -486,3 +486,34 @@ test("ADR-0006 用例 F（评审 Q4 闭环）：作废后 /status pendingRestart
   assert.equal(s.result?.status, "intent-retired");
   assert.equal(s.result?.error, "superseded-by-auth-action:logout");
 });
+
+// ---- v1.2.25：Q5 pendingRestart 态主视图放弃出口（主人裁定并入 2026-11-03）----
+
+const PENDING_RESULT = { operationId: "op-p", status: "pending-restart", phase: "catalog-landed", changes: { catalogAdded: 1, modelsAdded: 0, modelsRemoved: 0 }, error: null };
+
+test("Q5 用例 G：pendingRestart → retire-request 进 retireConfirm（result 入口）→ confirm → retired 闭环", async () => {
+  const f = makeFetch();
+  const pending = { ...initial, name: "pendingRestart", result: PENDING_RESULT };
+  const s1 = reduce(pending, { type: "retire-request" })[0];
+  assert.equal(s1.name, "retireConfirm", "主视图放弃出口直达确认弹窗，免去 423 迂回");
+  assert.equal(s1.result.operationId, "op-p");
+  f.respond(R, { body: { ok: true, result: { operationId: "op-p", status: "intent-retired", error: null } } });
+  f.respond(S, { body: { refresh: { scopeAvailable: true, catalogMode: "file", pendingRestart: false, lastResult: { operationId: "op-p", status: "intent-retired", error: null }, activeOperation: null } } });
+  const s2 = await advance(s1, { type: "retire-confirm" }, f);
+  assert.equal(s2.name, "result", "放弃后经 status 水合落 result（pendingRestart=false 为 Q4 守卫配合项）");
+  assert.equal(s2.result?.status, "intent-retired");
+  assert.equal(s2.result?.error, null);
+});
+
+test("Q5 用例 H：cancel 回 pendingRestart；retire-fail 回 pendingRestart 可重试；无 operationId 不出口", () => {
+  const pending = { ...initial, name: "pendingRestart", result: PENDING_RESULT };
+  const confirm = reduce(pending, { type: "retire-request" })[0];
+  const c = reduce(confirm, { type: "cancel" })[0];
+  assert.equal(c.name, "pendingRestart", "取消回待重启横幅，不落进无提示的 result 空态");
+  assert.equal(c.result?.status, "pending-restart");
+  const fail = reduce({ name: "retiring", result: PENDING_RESULT }, { type: "retire-fail", error: "retireboom" })[0];
+  assert.equal(fail.name, "pendingRestart", "失败回待重启横幅可重试（带 retireError）");
+  assert.equal(fail.retireError, "retireboom");
+  const noId = reduce({ ...initial, name: "pendingRestart", result: null }, { type: "retire-request" })[0];
+  assert.equal(noId.name, "pendingRestart", "无 result.operationId 不给出口");
+});

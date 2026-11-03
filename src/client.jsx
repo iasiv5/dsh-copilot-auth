@@ -101,6 +101,7 @@ const DICTS = {
     retireBtnPending: "Discard the pending change",
     retireConfirmPending: "Discarding drops this pending change; catalog data already written is kept. Preview and apply again afterwards.",
     retiredByAuth: "Authorization changed (sign-in or sign-out) and the in-flight model configuration change was discarded. Preview and apply again.",
+    discarded: "The pending change was discarded; catalog data already written is kept. Preview and apply again afterwards.",
     legacy: "Legacy shared recovery state was found. It will not be applied automatically; preview and confirm in this profile.",
     techDetails: "Technical details",
     stateCorrupt: "State file was corrupted and quarantined. Preview and confirm again.",
@@ -196,6 +197,7 @@ const DICTS = {
     retireBtnPending: "放弃待重启的更改",
     retireConfirmPending: "放弃后，本次待重启的更改将被丢弃；已落盘的目录数据保留，之后可重新预览并应用。",
     retiredByAuth: "授权状态已变化（登录或退出登录），进行中的模型配置更改已作废；请重新预览并应用。",
+    discarded: "已放弃该次待重启的更改；已落盘的目录数据保留，可重新预览并应用。",
     legacy: "检测到旧的共享恢复状态。不会自动应用，请在当前 profile 重新预览确认。",
     techDetails: "技术详情",
     stateCorrupt: "恢复状态无法读取，原件已保留。请重新预览确认。",
@@ -772,7 +774,16 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
             <p style={styles.banner}>ⓘ {t("legacy")}</p>
           )}
           {flow.name === "pendingRestart" && (
-            <p style={styles.banner}>⚠ {t("pendingRestart")}</p>
+            <>
+              <p style={styles.banner}>⚠ {t("pendingRestart")}{flow.retireError ? `（${flow.retireError}）` : ""}</p>
+              {flow.result?.operationId && (
+                <div>
+                  <button type="button" style={{ ...styles.button, ...styles.secondary }} onClick={() => drive({ type: "retire-request" })}>
+                    {t("retireBtnPending")}
+                  </button>
+                </div>
+              )}
+            </>
           )}
           {flow.name === "busy" && (
             <p style={styles.banner}>ⓘ {flow.active?.phaseResult?.status === "pending-restart" ? t("busyPendingRestart") : t("busy")}{flow.retireError ? `（${flow.retireError}）` : ""}</p>
@@ -796,11 +807,12 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
             <div>
               {(() => {
                 const st = flow.result?.status;
-                // ADR-0006：授权动作即时作废的操作，给精确原因文案而非泛化的 recoveryNeeded
+                // ADR-0006：授权动作即时作废的操作给精确原因文案；主人自行放弃（Q5）给 discarded
                 const retiredByAuth = st === "intent-retired"
                   && typeof flow.result?.error === "string"
                   && flow.result.error.startsWith("superseded-by-auth-action:");
-                const key = retiredByAuth ? "retiredByAuth" : {
+                const selfDiscarded = st === "intent-retired" && !retiredByAuth && flow.result?.error == null;
+                const key = retiredByAuth ? "retiredByAuth" : selfDiscarded ? "discarded" : {
                   applied: "applied",
                   conflict: "conflict",
                   partial: "partial",
@@ -810,7 +822,7 @@ function CopilotSection({ t = (key) => DICTS.en[key] ?? key }) {
                   "intent-retired": "recoveryNeeded",
                 }[st];
                 return key
-                  ? <p style={st === "applied" ? styles.banner : styles.error}>{st === "applied" ? "✓" : "⚠"} {t(key)}</p>
+                  ? <p style={st === "applied" || key === "discarded" ? styles.banner : styles.error}>{st === "applied" ? "✓" : key === "discarded" ? "ⓘ" : "⚠"} {t(key)}</p>
                   : null;
               })()}
               {["recovery-needed", "rollback-conflict", "intent-retired"].includes(flow.result?.status) && (

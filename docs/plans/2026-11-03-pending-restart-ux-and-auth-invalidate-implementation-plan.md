@@ -165,4 +165,4 @@ client.jsx（P0，构建产物 lib/client.js 随包发布）
 - Q3（重要→已修复）：invalidate 映射以 `idempotent !== true` 守卫——真内核在无 active 且 lastResult 为空时经 `undefined===undefined` 误入幂等分支，原实现虚报 invalidated:true；内核 retire 语义零改动，TX_RETIRE_UNDEFINED_OP 钉例防漂移，service mock 补齐幂等分支消除假绿（commit c0e4103）。
 - Q4（重要→已修复，组装层）：作废/放弃后内核 restartState 残留使 /status pendingRestart 恒真、刷新后水合落 pendingRestart 态遮蔽作废事实——host.mjs /status 组装处对「activeOperation==null 且 lastResult.status=intent-retired」置 pendingRestart=false；正常 pending-restart 与水合判序（约束 3）零改动；host 正反两态测试 + flow 用例 F（本提交）。
 - V6 备注：计划「文件结构与职责」表漏列 src/refresh-flow.mjs（Task 4 machine 改动实际落点），实现正确、计划表笔误，随本节补记。
-- Q5（建议→待主人决策，未实施）：pendingRestart 态（apply-ok 主路径落点与水合落点）渲染层无放弃出口，放弃须经「重新预览 → apply 撞 423 → busy」迂回；README L67-68 已按「未实施」口径如实改写。属设计覆盖面扩展（约束 4 允许扩展既有按钮可见条件），交主人裁定是否列入后续版本。
+- Q5（建议→**主人裁定 A：并入 1.2.25**，2026-11-03）：pendingRestart 态主视图放弃出口已实现——machine 增 result 入口分支（携 result.operationId；cancel/retire-fail 回落 pendingRestart 可重试，不落静默空态）、渲染层横幅附「放弃待重启的更改」按钮、结果态新增 discarded 文案（intent-retired 三分支：superseded 前缀→retiredByAuth、error==null→discarded、其余→recoveryNeeded）；README 恢复直述写法。评审补核后随本版发布。
