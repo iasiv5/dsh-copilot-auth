@@ -390,7 +390,9 @@ export function createTransaction(ctx, {
       const active = st?.activeOperation;
       if (!active) return { ok: true, active: false };
 
-      // intentVersion 漂移：不消费旧 target，标记 recovery-needed（用户经 retire 显式结束后重新预览）
+      // intentVersion 漂移：不消费旧 target，标记 recovery-needed（用户经 retire 显式结束后重新预览）。
+      // 兜底定位（ADR-0006，v1.2.25 起）：正常路径的授权失效已由 auth 动作即时作废
+      // （invalidateForAuthAction），此处只应被崩溃窗口/外部改写触达。
       if (active.intentVersion !== readIntentVersion()) {
         const next = stateIO.load();
         next.activeOperation = { ...active, phaseResult: { status: "recovery-needed", error: "intent-version-drift" } };
@@ -544,7 +546,9 @@ export function createTransaction(ctx, {
   }
 
   // ---- retire：静止核实后清 activeOperation（服务队列内串行即静止；绝不写配置） ----
-  async function retire({ operationId } = {}) {
+  // reason（ADR-0006）：授权动作即时作废时携带受控原因串（superseded-by-auth-action:<source>），
+  // 透传为 lastResult.error；未携带时维持既有 drift 语义。
+  async function retire({ operationId, reason } = {}) {
     const state = stateIO.load();
     const active = state?.activeOperation;
     if (!active) {
@@ -555,13 +559,14 @@ export function createTransaction(ctx, {
       return { ok: false, error: "operation-mismatch" };
     }
     const drift = active.intentVersion !== readIntentVersion();
+    const reasonText = typeof reason === "string" && reason.length > 0 && reason.length <= 120 ? reason : null;
     const result = {
       operationId: active.operationId,
       status: "intent-retired",
       phase: active.phase,
       drift,
       changes: null,
-      error: drift ? "intent-version-drift: old target not consumed" : null,
+      error: reasonText ?? (drift ? "intent-version-drift: old target not consumed" : null),
     };
     const next = { ...state, activeOperation: null, lastResult: result };
     next.intentVersion = readIntentVersion();

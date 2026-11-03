@@ -269,6 +269,22 @@ test("TX_RETIRE：静止核实后清 activeOperation；幂等；drift 不消费�
   assert.equal(w3.settings.mutateCalls.length, 0, "不消费旧 target");
 });
 
+test("TX_RETIRE_REASON：retire 携带受控 reason → lastResult.error 逐字透传（ADR-0006）", async () => {
+  const w = makeWorld();
+  await w.makeTx().runApply({ snapshot: makeSnapshot(w) }); // active: pending-restart
+  const r = await w.makeTx().retire({ operationId: "op-1", reason: "superseded-by-auth-action:logout" });
+  assert.equal(r.ok, true);
+  assert.equal(r.result.status, "intent-retired");
+  assert.equal(r.result.error, "superseded-by-auth-action:logout");
+  assert.equal(w.stateIO.load().activeOperation, null);
+  assert.equal(w.settings.mutateCalls.length, 0, "带 reason 的 retire 同样绝不写配置");
+  // 无 reason 的既有行为不变（无 drift 时 error 为 null）
+  const w2 = makeWorld();
+  await w2.makeTx().runApply({ snapshot: makeSnapshot(w2) });
+  const r2 = await w2.makeTx().retire({ operationId: "op-1" });
+  assert.equal(r2.result.error, null);
+});
+
 test("TX_SELF_HEAL：同基线且条目已在盘 → 幂等零写入", async () => {
   const w = makeWorld();
   writeFileSync(w.catalogFile, JSON.stringify({ ...BASE_CATALOG, "openai-completions": { ...BASE_CATALOG["openai-completions"], "new-1": NEW_ENTRY } }, null, 2) + "\n");

@@ -39,7 +39,7 @@ function authError(code, message, extra = {}) {
   return err;
 }
 
-export function createAuthorizationController(ctx, { scope, intentIO, clock = { now: () => Date.now() }, onAuthorized } = {}) {
+export function createAuthorizationController(ctx, { scope, intentIO, clock = { now: () => Date.now() }, onAuthorized, onIntentBump } = {}) {
   let attempt = null;
   let riskLatch = null; // { reason, at } — 进程级风险锁存，本进程生命周期内不解除
 
@@ -69,6 +69,10 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
     }
     // 先持久意图版本，失败不发 begin（安全门拒绝动作不产生副作用）
     const originIntentVersion = intentIO.bump();
+    // ADR-0006：栅栏抬升的同一时刻即时作废进行中的模型配置操作（fire-and-forget，不阻断授权主路径）
+    if (typeof onIntentBump === "function") {
+      try { onIntentBump("auth-start"); } catch { /* 回调异常不阻断授权 */ }
+    }
     const a = {
       attemptId: randomUUID(),
       status: "starting",
@@ -143,6 +147,10 @@ export function createAuthorizationController(ctx, { scope, intentIO, clock = { 
     if (riskLatch) throw authError("LOGOUT_UNSAFE", "logout-unsafe");
     // 本 profile 显式操作：旧预览/模型配置意图先行失效（失败则不动凭据）
     intentIO.bump();
+    // ADR-0006：作废即时化——不等到 boot 漂移检查才暴露（fire-and-forget，不阻断退出主路径）
+    if (typeof onIntentBump === "function") {
+      try { onIntentBump("logout"); } catch { /* 回调异常不阻断退出 */ }
+    }
     try {
       const deleted = await ctx.credentials.deleteRecord(CREDENTIAL_KEY);
       if (deleted === false) throw authError("LOGOUT_FAILED", "logout-failed");

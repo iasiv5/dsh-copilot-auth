@@ -17,6 +17,7 @@ function makeHarness({ begin } = {}) {
     },
   };
   const handoffs = [];
+  const bumps = [];
   const calls = { begin: 0 };
   const ctx = {
     authorization: {
@@ -28,7 +29,7 @@ function makeHarness({ begin } = {}) {
     },
   };
   const h = {
-    calls, clock, handoffs, intentIO,
+    calls, clock, handoffs, intentIO, bumps,
     credentials: ctx.credentials,
     credentialsPresent: false,
     advance: (ms) => { now += ms; },
@@ -37,6 +38,7 @@ function makeHarness({ begin } = {}) {
       intentIO,
       clock,
       onAuthorized: (x) => handoffs.push(x),
+      onIntentBump: (s) => bumps.push(s),
     }),
   };
   return h;
@@ -227,4 +229,34 @@ test("AUTH_cause_code：网络层失败附 cause.code，桌面/代理类环境�
   await h4.controller.start();
   await new Promise((r) => setTimeout(r, 5));
   assert.equal(h4.controller.snapshot().error, "fetch failed");
+});
+
+test("AUTH_intent_bump：start 成功 → onIntentBump 恰收到一次 auth-start（ADR-0006）", async () => {
+  const h = makeHarness();
+  await h.controller.start();
+  assert.deepEqual(h.bumps, ["auth-start"]);
+});
+
+test("AUTH_intent_bump：ALREADY_CONFIGURED 拒绝的 start 不触发 onIntentBump（门禁前置于 bump）", async () => {
+  const h = makeHarness({ begin: () => new Promise(() => {}) });
+  h.credentialsPresent = true;
+  await assert.rejects(() => h.controller.start(), (e) => e.code === "ALREADY_CONFIGURED");
+  assert.deepEqual(h.bumps, [], "被拒的授权尝试不产生意图副作用");
+});
+
+test("AUTH_intent_bump：logout 成功 → onIntentBump 收到 logout", async () => {
+  const h = makeHarness();
+  h.credentialsPresent = true;
+  await h.controller.logout();
+  assert.deepEqual(h.bumps, ["logout"]);
+});
+
+test("AUTH_intent_bump：ATTEMPT_RUNNING 拒绝的 logout 不触发 onIntentBump", async () => {
+  const h = makeHarness({ begin: () => new Promise(() => {}) });
+  await h.controller.start();
+  await new Promise((r) => setTimeout(r, 5));
+  h.bumps.length = 0; // 清掉 start 自身的一次，隔离本用例
+  h.credentialsPresent = true;
+  await assert.rejects(() => h.controller.logout(), (e) => e.code === "ATTEMPT_RUNNING");
+  assert.deepEqual(h.bumps, [], "被拒的退出不产生意图副作用");
 });

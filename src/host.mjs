@@ -389,11 +389,24 @@ export function apply(ctx, opts = {}) {
     ctx.logger?.warn?.("copilot-auth: model sync failed: %s", lastSyncError);
   });
 
+  // ADR-0006：授权动作即时作废进行中的模型配置操作。service 晚于 controller 创建（L479），
+  // 用晚绑定 ref；fire-and-forget，失败只记日志，绝不影响授权动作本身。
+  let refreshServiceRef = null;
+  const onIntentBump = (source) => {
+    const svc = refreshServiceRef;
+    const invalidate = svc?.invalidateForAuthAction;
+    if (typeof invalidate !== "function") return;
+    Promise.resolve(invalidate.call(svc, source)).catch((err) => {
+      ctx.logger?.warn?.("copilot-auth: invalidate for %s failed: %s", source, String(err?.message ?? err));
+    });
+  };
+
   // 授权控制器（T3）：软撤回＋风险锁存；退出/重新授权在当前宿主下统一禁用。
   const controller = createAuthorizationController(ctx, {
     scope,
     intentIO,
     onAuthorized: (handoff) => { void runSync(handoff); },
+    onIntentBump,
   });
 
   // ---- 初始化期能力探测（Q23：GET status 不执行写探针，通道分类来自此处缓存） ----
@@ -488,6 +501,7 @@ export function apply(ctx, opts = {}) {
     transaction,
     fetchImpl,
   });
+  refreshServiceRef = refreshService; // ADR-0006：晚绑定回填（见 onIntentBump）
 
   // 启动序列（boot 恢复＋保守激活/自愈，T9 bootRecover）；绝不阻断挂载。
   void refreshService.bootReady()

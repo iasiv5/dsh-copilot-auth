@@ -85,7 +85,15 @@ function makeHarness({
       return { ok: true, operationId: snapshot.operationId, result: { status: "applied", changes: { modelsAdded: 1 } } };
     },
     retireCalls: [],
-    retire: async ({ operationId }) => { tx.retireCalls.push(operationId); return { ok: true, status: "intent-retired" }; },
+    retireReasons: [],
+    retire: async ({ operationId, reason }) => {
+      tx.retireCalls.push(operationId);
+      tx.retireReasons.push(reason);
+      // 忠实于真内核：无 active → not-active（invalidate 据此映射 invalidated:false）
+      const st = stateIO.load();
+      if (!st?.activeOperation) return { ok: false, error: "not-active" };
+      return { ok: true, result: { status: "intent-retired", error: reason ?? null } };
+    },
     bootRecover: async () => ({ ok: true }),
   };
   const ctx = {
@@ -313,6 +321,26 @@ test("幂等与忙：同 operationId 返回已知结果（active/last），不�
   assert.equal(await errCode(h.service.apply({ previewId: p2.previewId, operationId: p2.operationId })), "RESOURCE_BUSY");
   const s = await h.service.status({ operationId: "never-seen" });
   assert.equal(s.query, "unknown", "unknown 不是未执行，只是不在保留窗口");
+});
+
+test("SERVICE_INVALIDATE：授权动作即时作废 active；无 active 幂等；非法 source 拒绝（ADR-0006）", async () => {
+  const h = makeHarness();
+  h.tx.mode = "active";
+  const p = await h.service.preview({ protocolVersion: PROTOCOL_VERSION, operation: "manage", selectedIds: ["new-1"] });
+  await h.service.apply({ previewId: p.previewId, operationId: p.operationId });
+  assert.equal(h.store.value?.activeOperation?.operationId, p.operationId, "前置：active 在场");
+  const inv = await h.service.invalidateForAuthAction("logout");
+  assert.deepEqual(inv, { ok: true, invalidated: true, result: { status: "intent-retired", error: "superseded-by-auth-action:logout" } });
+  assert.equal(h.tx.retireCalls.at(-1), undefined, "operationId 恒 undefined＝终结当前 active（清 activeOperation 是内核行为，TX_RETIRE 已覆盖）");
+  assert.equal(h.tx.retireReasons.at(-1), "superseded-by-auth-action:logout");
+
+  // 无 active：幂等 no-op（不抛、不清 lastResult）
+  const h2 = makeHarness();
+  const inv2 = await h2.service.invalidateForAuthAction("auth-start");
+  assert.deepEqual(inv2, { ok: true, invalidated: false });
+
+  // 非法 source：拒绝
+  assert.equal(await errCode(h2.service.invalidateForAuthAction("nope")), "INVALID_SOURCE");
 });
 
 test("apply 串行：第二个 apply 等第一个完成后才进入内核", async () => {

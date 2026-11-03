@@ -314,6 +314,19 @@ export function createRefreshService(ctx, {
     return queue(() => transaction.retire({ operationId: body?.operationId }));
   }
 
+  // ADR-0006：授权动作（start/logout）bump 意图栅栏的同一时刻，即时终结进行中的 refresh 操作。
+  // 幂等：无 activeOperation 时 {ok:true, invalidated:false}；operationId 恒 undefined
+  // （transaction.retire 语义＝终结当前 active，无需 service 层读状态或校验归属）。
+  async function invalidateForAuthAction(source) {
+    requireScope();
+    if (source !== "auth-start" && source !== "logout") {
+      throw flowError("INVALID_SOURCE", "invalid invalidate source");
+    }
+    if (!transaction) throw flowError("DEPS_MISSING", "transaction kernel not wired");
+    const res = await queue(() => transaction.retire({ operationId: undefined, reason: `superseded-by-auth-action:${source}` }));
+    return res?.ok ? { ok: true, invalidated: true, result: res.result } : { ok: true, invalidated: false };
+  }
+
   async function bootReady() {
     requireScope();
     if (!transaction) return { ok: true, skipped: true };
@@ -332,5 +345,5 @@ export function createRefreshService(ctx, {
     return snapshots.size;
   }
 
-  return { preview, apply, status, retire, bootReady, dispose, snapshotCount };
+  return { preview, apply, status, retire, invalidateForAuthAction, bootReady, dispose, snapshotCount };
 }
