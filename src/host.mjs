@@ -113,7 +113,43 @@ async function syncAvailableModels(ctx, opts = {}) {
   ], desc?.revision);
 }
 
+function isLoopbackHostname(hostname) {
+  if (hostname === "localhost" || hostname === "[::1]") return true;
+  const parts = hostname.split(".");
+  return parts.length === 4 && parts[0] === "127" && parts.every((p) => /^\d{1,3}$/.test(p) && Number(p) <= 255);
+}
+
+// know-how 035 兼容层：webStartup (0.2.1+) → webRuntime (≤0.2.0) → []；非抛式查询。
+function trustedHostsOf(ctx) {
+  let startup, runtime;
+  try { startup = ctx?.get?.("webStartup"); } catch { /* 未注入即缺席 */ }
+  try { runtime = ctx?.get?.("webRuntime"); } catch { /* 同上 */ }
+  return startup?.trustedHosts ?? runtime?.trustedHosts ?? [];
+}
+
+/** Host 必须是 loopback 或宿主信任名单成员——DNS rebinding 下 Host=攻击者域，必被拒。 */
+function isTrustedHostRequest(req, trustedHosts) {
+  const host = req.headers?.host;
+  if (typeof host !== "string" || host === "") return false;
+  let hostname;
+  try {
+    hostname = new URL(`http://${host}`).hostname;
+  } catch {
+    return false;
+  }
+  if (isLoopbackHostname(hostname)) return true;
+  return (trustedHosts ?? []).some((entry) => {
+    try {
+      const parsed = new URL(`http://${entry}`);
+      return parsed.port !== "" ? `${parsed.hostname}:${parsed.port}` === host : parsed.hostname === hostname;
+    } catch {
+      return false;
+    }
+  });
+}
+
 function sameOrigin(req) {
+  if (req.headers?.["sec-fetch-site"] === "cross-site") return false;
   const origin = req.headers?.origin;
   if (origin === undefined || origin === null || origin === "") return true;
   try {
@@ -123,21 +159,50 @@ function sameOrigin(req) {
   }
 }
 
+/** 官方信任检查的守卫式委派（dsh-m 0.9.0 同款）：服务在位 → 官方判定；服务查不到（含未注入名 get 抛错，兼容 0.1.x 无 connection 服务）→ undefined 回落本地栅栏；围栏执行抛错 → fail-closed 403。 */
+function officialRejection(ctx, req) {
+  let connection, reject;
+  try {
+    connection = ctx?.get?.("connection");
+    reject = connection?.requestRejection;
+  } catch {
+    return undefined;
+  }
+  if (typeof reject !== "function") return undefined;
+  try {
+    return reject.call(connection, { headers: req.headers }) ?? undefined;
+  } catch {
+    return 403;
+  }
+}
+
+/**
+ * 路由信任栅栏（2026-11-12 PR 评审同款强化）：原 guard 仅 Origin===Host，
+ * DNS rebinding（Origin 与 Host 均为攻击者域）可穿透驱动授权/退出/模型目录变更。
+ * 现官方 Connection 指纹围栏优先；官方服务缺席回落「Host ∈ loopback∪宿主名单 + 同源」。
+ */
+export function createGuard(ctx) {
+  return (req, res, method) => {
+    const rejection = officialRejection(ctx, req);
+    if (rejection !== undefined) {
+      json(res, rejection, { ok: false, error: "forbidden origin" });
+      return false;
+    }
+    if (!isTrustedHostRequest(req, trustedHostsOf(ctx)) || !sameOrigin(req)) {
+      json(res, 403, { ok: false, error: "forbidden origin" });
+      return false;
+    }
+    if (req.method !== method) {
+      json(res, 405, { ok: false, error: "method not allowed" });
+      return false;
+    }
+    return true;
+  };
+}
+
 function json(res, code, payload) {
   res.writeHead(code, { "content-type": "application/json" });
   res.end(JSON.stringify(payload));
-}
-
-function guard(req, res, method) {
-  if (!sameOrigin(req)) {
-    json(res, 403, { ok: false, error: "forbidden origin" });
-    return false;
-  }
-  if (req.method !== method) {
-    json(res, 405, { ok: false, error: "method not allowed" });
-    return false;
-  }
-  return true;
 }
 
 function readBody(req) {
@@ -364,6 +429,7 @@ function serviceError(res, err) {
 
 export function apply(ctx, opts = {}) {
   const r = routes();
+  const guard = createGuard(ctx); // 全路由信任检查：官方指纹围栏优先，缺席回落 Host 栅栏 + 同源
   const scope = resolveRuntimeScope(ctx);
   const intentIO = createIntentIO(scope);
   const legacyPath = opts.stateFile ?? defaultStateFile();
