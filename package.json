@@ -54,7 +54,7 @@
     "node": ">=20"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.2"
+    "@deepseek-ai/cordis": ">=4.0.2"
   },
   "devDependencies": {
     "esbuild": "^0.24.0",
@@ -64,7 +64,7 @@
   },
   "dsh": {
     "engines": {
-      "dsh": ">=0.1.7-rc.2"
+      "dsh": ">=0.2.0-rc.1"
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
