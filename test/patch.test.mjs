@@ -17,9 +17,9 @@ test("insert 本插件 host entry，name 与 package.json 一致", () => {
   assert.equal(self?.name, pkg.name);
 });
 
-test("v1.2.x declares the DSH 0.1.7-rc.2 runtime floor", () => {
+test("v1.2.x declares the DSH runtime floor（2026-11-19 家族统一 S1：0.2.0-rc.1 起，无上盖）", () => {
   const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
-  assert.equal(pkg.dsh?.engines?.dsh, ">=0.1.7-rc.2");
+  assert.equal(pkg.dsh?.engines?.dsh, ">=0.2.0-rc.1");
 });
 
 test("patch llm-pi-ai 行预置 github-copilot 路由（base 层，无 apiKeyEnv）", () => {
