@@ -1,8 +1,8 @@
 # @inventec/dsh-copilot-auth
 
-[![npm](https://img.shields.io/npm/v/%40inventec%2Fdsh-copilot-auth?label=npm)](https://www.npmjs.com/package/@inventec/dsh-copilot-auth)
 [![CI](https://img.shields.io/github/actions/workflow/status/iasiv5/dsh-copilot-auth/ci.yml?branch=main&label=CI)](https://github.com/iasiv5/dsh-copilot-auth/actions/workflows/ci.yml)
-[![License](https://img.shields.io/github/license/iasiv5/dsh-copilot-auth?label=License)](https://github.com/iasiv5/dsh-copilot-auth/blob/main/LICENSE)
+[![npm](https://img.shields.io/npm/v/@inventec/dsh-copilot-auth?label=npm)](https://www.npmjs.com/package/@inventec/dsh-copilot-auth)
+[![License](https://img.shields.io/github/license/iasiv5/dsh-copilot-auth?label=License)](./LICENSE)
 [![DSH](https://img.shields.io/badge/DSH-0.2.2--rc.5%20verified-2563eb)](#版本兼容)
 
 为 DSH（DeepSeek Harness）内置的 GitHub Copilot 通道补上**网页设备码登录 / 注销**入口，预置开箱即用的 Copilot 提供方路由，并提供**模型列表管理**。用公司 GitHub 账号（带 Copilot 订阅）登录 DSH 的方式与其他 Copilot 客户端一致：**网页 + 设备码**，全程不填 API Token。
