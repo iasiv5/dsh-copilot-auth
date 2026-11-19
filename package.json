@@ -1,6 +1,6 @@
 {
   "name": "@inventec/dsh-copilot-auth",
-  "version": "1.2.26",
+  "version": "1.2.27",
   "description": "Copilot 设备码登录注销与模型列表管理，免 API Token，目录兜底不覆盖定制，凭据入内置凭据库。",
   "icon": "./icon.svg",
   "type": "module",
